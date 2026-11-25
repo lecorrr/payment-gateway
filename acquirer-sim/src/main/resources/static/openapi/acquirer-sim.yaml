@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: acquirer-sim
+  version: 0.1.0
+  description: >-
+    A simulated card acquirer for running payment-gateway without a real one. Charges are kept in memory and decided
+    by the card number:
+
+
+    | Card number      | Result                                             |
+    |------------------|----------------------------------------------------|
+    | 4000000000000002 | declined, do_not_honor                             |
+    | 4000000000009995 | declined, insufficient_funds                       |
+    | 4000000000000119 | declined, processing_error                         |
+    | 4000000000000259 | approved, but answered only after sim.slow-delay   |
+    | any other        | approved (4111111111111111, 5555555555554444, ...) |
+
+
+    A past expiry month gives expired_card, CVC 000 gives incorrect_cvc.
+servers:
+  - url: http://localhost:8091
+security:
+  - Bearer: []
+
+paths:
+  /v1/charges:
+    post:
+      operationId: createCharge
+      summary: Charge a card
+      description: >-
+        One charge per reference. The same request again returns the stored charge with 200; the same reference with
+        a different amount, currency or card is refused with 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargeRequest'
+      responses:
+        '201':
+          description: Charged or declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Charge'
+        '200':
+          description: The charge stored for this reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Charge'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: findCharge
+      summary: Find the charge with a reference
+      parameters:
+        - name: reference
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The charge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Charge'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+
+components:
+  securitySchemes:
+    Bearer:
+      type: http
+      scheme: bearer
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    ChargeRequest:
+      type: object
+      required: [reference, amount, currency, card]
+      properties:
+        reference:
+          type: string
+          maxLength: 64
+          description: The caller's id for this charge
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: In minor units
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          example: UAH
+        card:
+          type: object
+          required: [number, exp_month, exp_year, cvc]
+          properties:
+            number:
+              type: string
+              pattern: '^[0-9]{12,19}$'
+            exp_month:
+              type: integer
+              minimum: 1
+              maximum: 12
+            exp_year:
+              type: integer
+              minimum: 2000
+              maximum: 2100
+            cvc:
+              type: string
+              pattern: '^[0-9]{3,4}$'
+            holder:
+              type: string
+              maxLength: 100
+        description:
+          type: string
+          maxLength: 140
+
+    Charge:
+      type: object
+      required: [id, reference, status, amount, currency, created_at]
+      properties:
+        id:
+          type: string
+          example: ch_3f9a1c2b7d4e5f6a7b8c9d0e
+        reference:
+          type: string
+        status:
+          type: string
+          enum: [approved, declined]
+        decline_code:
+          type: string
+          description: Only when declined
+          example: insufficient_funds
+        auth_code:
+          type: string
+          description: Only when approved
+          example: '482913'
+        amount:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: invalid_request
+        message:
+          type: string

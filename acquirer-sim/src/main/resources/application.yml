@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: acquirer-sim
+
+server:
+  port: 8091
+
+sim:
+  api-key: ${ACQUIRER_SIM_API_KEY:}
+  slow-delay: 15s   # longer than the gateway's read timeout, so its answer is lost
+  max-charges: 10000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+springdoc:
+  swagger-ui:
+    url: /openapi/acquirer-sim.yaml

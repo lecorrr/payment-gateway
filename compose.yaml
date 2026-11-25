@@ -1,0 +1,49 @@
+# The gateway, the simulated acquirer and PostgreSQL for a local demo. Ports are published on localhost only.
+# Build the jars first (./mvnw package) and make the .env file as the README shows: without it compose won't start.
+name: payment-gateway
+
+services:
+  postgres:
+    image: postgres:17-alpine   # the same tag as postgres.image in pom.xml
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+    ports:
+      # 5436 by default, since 5432 and the next few are often taken; the gateway reads GATEWAY_DB_PORT too.
+      - "127.0.0.1:${GATEWAY_DB_PORT:-5436}:5432"
+    volumes:
+      - gateway-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  acquirer-sim:
+    build: ./acquirer-sim
+    image: acquirer-sim:local
+    environment:
+      ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
+    ports:
+      - "127.0.0.1:8091:8091"
+
+  gateway:
+    build: ./gateway-service
+    image: gateway-service:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      acquirer-sim:
+        condition: service_started
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/gateway
+      ACQUIRER_SIM_URL: http://acquirer-sim:8091
+      ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
+      GATEWAY_FINGERPRINT_KEY: ${GATEWAY_FINGERPRINT_KEY:?make the .env file first, see the README}
+      GATEWAY_DEMO_MERCHANT_API_KEY: ${GATEWAY_DEMO_MERCHANT_API_KEY:?make the .env file first, see the README}
+    ports:
+      - "127.0.0.1:8090:8090"
+
+volumes:
+  gateway-db:
