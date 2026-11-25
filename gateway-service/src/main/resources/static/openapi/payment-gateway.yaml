@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: payment-gateway merchant API
-  version: 0.2.0
+  version: 0.3.0
   description: >-
     Card payments for merchants. A merchant sends the card once; the gateway passes it to a payment provider,
     keeps only the brand, the first six and the last four digits, and answers with the payment's status.
@@ -285,9 +285,9 @@ components:
         declineCode:
           type: string
           description: >-
-            Why a DECLINED or FAILED payment did not go through, in the provider's words for a decline
-            (do_not_honor, insufficient_funds, expired_card, incorrect_cvc, processing_error,
-            authentication_failed, authentication_expired) or the gateway's for a failure (provider_unavailable,
+            Why a DECLINED or FAILED payment did not go through. A decline has the same codes whichever provider
+            charged the card (do_not_honor, insufficient_funds, expired_card, incorrect_cvc, processing_error,
+            authentication_failed, authentication_expired); a failure has the gateway's own (provider_unavailable,
             provider_rejected_request, provider_no_record)
           example: insufficient_funds
         createdAt:

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-11-25)
+
+- monobank: a second provider, through monobank's acquiring API. It charges with the card's details
+  (`payment-direct`), sends the customer to monobank's 3-D Secure page and back to the gateway, and turns monobank's
+  error codes into the gateway's decline codes. A charge whose answer was lost is found in monobank's statement by
+  the payment's id.
+- monobank's webhooks: `POST /providers/monobank/webhooks` takes a report only with monobank's ECDSA signature
+  (`X-Sign`), then looks the payment up with monobank rather than taking the report's word.
+- `GATEWAY_PROVIDER` picks the provider for new payments (acquirer-sim unless set). Each payment is looked up with
+  the provider that charged it, so switching leaves payments in flight with their own.
+- A provider still working on a charge keeps the payment as it is, and its id for the charge is stored, so later
+  lookups ask by it.
+- Decline codes are documented as the same whichever provider charged the card.
+- GitHub's secret scanning skips the test folders, whose example secrets are published test vectors.
+
 ## 0.2.0 (2026-11-25)
 
 - 3-D Secure: a payment the card's bank wants confirmed is `REQUIRES_ACTION` with a `nextAction` link. The

@@ -127,6 +127,23 @@ class PaymentRepository {
     }
 
     /**
+     * Keeps the provider's id for a charge that has no outcome yet, so later lookups can ask by it. Empty when the
+     * payment has an id already or is finished: then there is nothing to keep.
+     */
+    Optional<Payment> rememberProviderReference(UUID id, String providerReference, Instant now) {
+        return jdbc.sql("""
+                        UPDATE payments
+                        SET provider_reference = :providerReference, updated_at = :now
+                        WHERE id = :id AND provider_reference IS NULL AND status IN ('PROCESSING', 'REQUIRES_ACTION')
+                        RETURNING *""")
+                .param("id", id)
+                .param("providerReference", providerReference)
+                .param("now", utc(now))
+                .query(PaymentRepository::fromRow)
+                .optional();
+    }
+
+    /**
      * Claims the payments due for a check by moving their next check to leaseUntil, or to challengeLeaseUntil for one
      * waiting for its 3-D Secure challenge, so a checker running in another instance skips them. SKIP LOCKED lets
      * instances claim side by side without waiting for each other.

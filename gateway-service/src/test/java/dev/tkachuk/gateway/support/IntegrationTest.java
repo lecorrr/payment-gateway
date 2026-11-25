@@ -22,11 +22,11 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
 /**
- * The service against PostgreSQL in Testcontainers, with WireMock as acquirer-sim and as a merchant's webhook
- * endpoint, and short timings: the acquirer times out after 700 ms, a payment is first looked up after 1 s and given
- * up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms apart. All integration
- * tests share this one context, so they share its containers too. Every test starts with no payments, no webhook
- * events and only the demo merchant, which has no webhook endpoint.
+ * The service against PostgreSQL in Testcontainers, with WireMock as acquirer-sim, as monobank and as a merchant's
+ * webhook endpoint, and short timings: the providers time out after 700 ms, a payment is first looked up after 1 s
+ * and given up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms apart. New
+ * payments go to acquirer-sim. All integration tests share this one context, so they share its containers too.
+ * Every test starts with no payments, no webhook events and only the demo merchant, which has no webhook endpoint.
  */
 @SpringBootTest(properties = {
         "gateway.demo-merchant.api-key=" + IntegrationTest.DEMO_API_KEY,
@@ -39,16 +39,20 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
         "gateway.providers.acquirer-sim.api-key=test-acquirer-key-0123456789",
         "gateway.providers.acquirer-sim.connect-timeout=300ms",
         "gateway.providers.acquirer-sim.read-timeout=700ms",
+        "gateway.providers.monobank.token=" + IntegrationTest.MONOBANK_TOKEN,
+        "gateway.providers.monobank.connect-timeout=300ms",
+        "gateway.providers.monobank.read-timeout=700ms",
         "gateway.webhooks.dispatch-interval=100ms",
         "gateway.webhooks.connect-timeout=300ms",
         "gateway.webhooks.read-timeout=1s",
         "gateway.webhooks.retry-delays=200ms,200ms"})
 @AutoConfigureMockMvc
-@Import({PostgresTestcontainer.class, AcquirerStub.class, MerchantEndpointStub.class})
+@Import({PostgresTestcontainer.class, AcquirerStub.class, MonobankStub.class, MerchantEndpointStub.class})
 public abstract class IntegrationTest {
 
     protected static final String DEMO_API_KEY = "test-demo-merchant-key-0123456789";
     protected static final String PUBLIC_URL = "http://gateway.test";
+    protected static final String MONOBANK_TOKEN = "test-monobank-token";
     protected static final String VISA = "4111 1111 1111 1111";
     protected static final String MASTERCARD = "5555 5555 5555 4444";
 
@@ -63,6 +67,10 @@ public abstract class IntegrationTest {
     protected WireMockServer acquirer;
 
     @Autowired
+    @Qualifier("monobank")
+    protected WireMockServer monobank;
+
+    @Autowired
     @Qualifier("merchantEndpoint")
     protected WireMockServer merchantEndpoint;
 
@@ -73,6 +81,7 @@ public abstract class IntegrationTest {
         jdbc.update("DELETE FROM webhook_endpoints");
         jdbc.update("DELETE FROM merchants WHERE code <> 'demo-shop'");
         acquirer.resetAll();
+        monobank.resetAll();
         merchantEndpoint.resetAll();
     }
 

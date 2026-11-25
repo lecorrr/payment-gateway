@@ -62,6 +62,11 @@ services:
       GATEWAY_DEMO_MERCHANT_WEBHOOK_URL: http://merchant-sim:8092/webhooks
       GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET: ${GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET:?make the .env file first, see the README}
       GATEWAY_PUBLIC_URL: http://localhost:${GATEWAY_PORT:-8090}
+      # acquirer-sim unless .env says monobank, which then needs a token. monobank can't reach this machine, so
+      # its webhooks stay off unless GATEWAY_MONOBANK_WEBHOOK_URL is a public address of this gateway.
+      GATEWAY_PROVIDER: ${GATEWAY_PROVIDER:-acquirer-sim}
+      GATEWAY_MONOBANK_TOKEN: ${GATEWAY_MONOBANK_TOKEN:-}
+      GATEWAY_MONOBANK_WEBHOOK_URL: ${GATEWAY_MONOBANK_WEBHOOK_URL:-}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8090}:8090"
 

@@ -1,9 +1,9 @@
 # Architecture
 
-Three Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments;
-**acquirer-sim** plays a card acquirer behind it, with its own API, error format and naming (snake_case), the way a
-real provider would; **merchant-sim** plays a shop in front of it, taking the gateway's webhooks and the customer's
-return from 3-D Secure. The three share no code: merchant-sim checks webhook signatures with its own code, and a
+Three Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments, and
+charges cards with acquirer-sim or with monobank's acquiring API; **acquirer-sim** plays a card acquirer behind it,
+with its own API, error format and naming (snake_case), the way a real provider would; **merchant-sim** plays a shop
+in front of it, taking the gateway's webhooks and the customer's return from 3-D Secure. The three share no code: merchant-sim checks webhook signatures with its own code, and a
 test in each app checks the same published signature example, so the two sides can't drift apart.
 
 ## Modules of gateway-service
@@ -14,7 +14,7 @@ test in each app checks the same published signature example, so the two sides c
 | `card`     | card number (Luhn, brand, masking), expiry, CVC; no framework imports                   | common                         |
 | `webhook`  | merchants' webhook endpoints and secrets, the outbox, signing, the dispatcher           | common                         |
 | `merchant` | merchants, the API key filter, the current merchant, the demo merchant                  | common, webhook                |
-| `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ProviderResult`); one package per provider below it | common, card |
+| `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ChargeLookup`, `ProviderResult`), the connectors by name, `ChargeNotifications`; one package per provider below it (`acquirersim`, `monobank`) | common, card |
 | `payment`  | the API controller, `PaymentService`, the payments table, fingerprints, the checker, the 3-D Secure return | common, card, merchant, provider, webhook, api |
 
 `api` is the interface and DTOs generated from
@@ -26,7 +26,8 @@ else. `webhook` knows nothing of payments: it stores and sends whatever JSON bod
 ## A payment, step by step
 
 1. `ApiKeyFilter` hashes `X-Api-Key` (SHA-256) and looks the merchant up; no match is 401. Paths are public only by
-   an allow list (health, docs, `/3ds/`), so a new endpoint is protected by default.
+   an allow list (health, docs, `/3ds/`, providers' webhooks under `/providers/`), so a new endpoint is protected by
+   default.
 2. Bean validation from the contract checks the request's shape; `PaymentMapper` then parses the card and the
    return URL: a number that fails the Luhn check is 422 `CARD_INVALID`, a return URL that is no URL 422
    `RETURN_URL_INVALID`.
@@ -35,26 +36,29 @@ else. `webhook` knows nothing of payments: it stores and sends whatever JSON bod
    422 `CARD_EXPIRED`. Requests refused here store nothing, so the key can be used again.
 4. The payment is inserted as `PROCESSING` with its first check due (`INSERT ... ON CONFLICT DO NOTHING`; losing a
    race with a parallel request turns into a replay of the winner's payment).
-5. The provider is called outside any transaction, with the payment's id as the reference and the gateway's
-   `/3ds/return/{id}` as the return URL. What came back decides the status:
+5. The active provider (`gateway.providers.active`) is called outside any transaction, with the payment's id as
+   the reference and the gateway's `/3ds/return/{id}` as the return URL; the payment keeps the provider's name. What
+   came back decides the status:
 
    | What happened                                          | Outcome          | Payment                                  |
    |--------------------------------------------------------|------------------|------------------------------------------|
    | approved                                               | APPROVED         | `SUCCEEDED`                              |
    | declined                                               | DECLINED         | `DECLINED` with the provider's code      |
    | requires_action with a challenge URL                   | REQUIRES_ACTION  | `REQUIRES_ACTION` with `nextAction`      |
+   | still processing                                       | PENDING          | stays as it is; the provider's id is kept |
    | 4xx: the request itself was refused                    | FAILED           | `FAILED`, `provider_rejected_request`    |
    | connection refused, unknown host, connect timeout      | FAILED           | `FAILED`, `provider_unavailable`         |
    | 5xx, read timeout, dropped connection, unreadable body | UNKNOWN          | stays `PROCESSING`                       |
 
 6. The change is written with `UPDATE ... WHERE status IN ('PROCESSING', 'REQUIRES_ACTION')` (only `PROCESSING` for
-   the move to `REQUIRES_ACTION`), in one transaction with its webhook event. Whichever of the request, the checker
-   and the customer's return writes a change first, that one stands, and only it gets an event.
+   the move to `REQUIRES_ACTION`), in one transaction with its webhook event. Whichever of the request, the checker,
+   the customer's return and a provider's webhook writes a change first, that one stands, and only it gets an event.
 
 `PendingPaymentChecker` runs every `check-interval`. It claims the payments whose next check is due with
 `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)`, which also moves their next check forward
 (`check-interval` for `PROCESSING`, `challenge-check-interval` for `REQUIRES_ACTION`), so instances don't wait for
-each other and skip what another one has just claimed. It looks each one up by reference: an outcome is recorded
+each other and skip what another one has just claimed. It looks each one up with the provider that charged it, by
+the payment's id and the provider's own id when there is one: an outcome is recorded
 as above; no record of the charge after `give-up-after` (10 minutes) is `FAILED`, `provider_no_record`; a failed
 lookup changes nothing, since it says nothing about the charge, and the payment is asked about again.
 
@@ -76,6 +80,34 @@ brings, and settles the payment from the provider's own answer, so a forged retu
 A customer who never comes back leaves the payment to the checker, which looks it up every
 `challenge-check-interval`; acquirer-sim declines a challenge left open for `sim.challenge-ttl` (15 minutes) with
 `authentication_expired`, and the next lookup settles the payment.
+
+## monobank
+
+`MonobankConnector` charges with monobank's `payment-direct`, which takes the card's details; monobank opens it to
+merchants with a PCI DSS certificate. The payment's id goes as `merchantPaymInfo.reference`, the amount in minor
+units, the currency as its ISO 4217 number. monobank answers with an invoice:
+
+| Invoice                                 | Outcome          | Why                                                         |
+|-----------------------------------------|------------------|-------------------------------------------------------------|
+| `success`                               | APPROVED         |                                                             |
+| `processing` with a `tdsUrl`            | REQUIRES_ACTION  | the customer goes to `tdsUrl` and comes back to `/3ds/return/{id}` |
+| `processing`, `created`                 | PENDING          | monobank is still working on it; its invoice id is kept     |
+| `failure`                               | DECLINED         | `errCode` turned into the gateway's code, by `MonobankDeclineCodes` |
+| `expired`                               | DECLINED         | the customer never finished 3-D Secure: `authentication_expired` |
+| `hold`, `reversed`, anything new        | PENDING          | can't follow the gateway's debits; logged for someone to look |
+
+`payment-direct` names a failure's reason in words only, so the connector asks the invoice's status for its `errCode`.
+Lookups ask the invoice status by its id. A charge whose answer was lost has no invoice id at the gateway, so the
+lookup searches monobank's statement since the charge (less a minute, for the clocks) for the payment's id first;
+not there is NOT_FOUND, and a statement that can't be read is UNKNOWN, never NOT_FOUND, so it can't make the
+gateway give up on a charge that went through.
+
+With `gateway.providers.monobank.webhook-url` set, monobank reports each change of the invoice to
+`POST /providers/monobank/webhooks`. The report counts only if its `X-Sign`, an ECDSA (P-256, SHA-256) signature over
+the body's exact bytes, matches monobank's public key; the key is fetched from `/api/merchant/pubkey` once and
+again, at most every 10 minutes, when a signature doesn't match. Even a signed report is only a reason to ask:
+through `ChargeNotifications`, the payment is looked up with monobank again, so a report that comes late or out of
+order can't set a payment back.
 
 ## Webhooks
 
@@ -107,15 +139,18 @@ A customer who never comes back leaves the payment to the checker, which looks i
 
 ## Adding a provider
 
-1. A new package under `provider`, with a `ProviderConnector` and its properties record.
+1. A new package under `provider`, with a `ProviderConnector` and its properties record. Its `name()` is stored with
+   each payment it charges; `missingSettings()` names what it still needs, and the active provider must need nothing.
 2. Map the provider's answers to `ProviderResult`. `FAILED` only when the card was certainly not charged; anything
-   in doubt is `UNKNOWN`, and the checker settles it with `lookup`. A 3-D Secure challenge is `REQUIRES_ACTION` with
-   the URL to send the customer to; the provider must send the browser back to the `returnUrl` of the
-   `ChargeRequest`.
-3. Test the failure modes with WireMock, as `AcquirerSimConnectorTest` does.
+   in doubt is `UNKNOWN`, and the checker settles it with `lookup`; a charge the provider is still working on is
+   `PENDING`. A 3-D Secure challenge is `REQUIRES_ACTION` with the URL to send the customer to; the provider must send
+   the browser back to the `returnUrl` of the `ChargeRequest`. Decline codes are the gateway's, as in the API contract.
+3. A lookup gets the payment's id, the provider's own id when the gateway has one, and when the charge was sent.
+4. A provider's webhook, if it has them, checks the provider's signature and calls `ChargeNotifications`.
+5. Test the failure modes with WireMock, as `AcquirerSimConnectorTest` and `MonobankConnectorTest` do.
 
-With one provider, `PaymentService` takes the only `ProviderConnector` bean; choosing between several comes with
-the second one.
+`ProviderConnectors` holds every connector by name and the active one; a payment is always looked up with the
+provider that charged it, so switching providers leaves payments in flight with their own.
 
 ## Decisions
 
@@ -130,6 +165,11 @@ the second one.
   with existing libraries, and the scheme covers the id and the time, so a replayed webhook is caught.
 - **Webhook secrets are stored as they are.** Signing needs the secret itself, so a hash won't do; in production it
   would be encrypted at rest with a key from a secrets manager.
+- **The gateway's own decline codes.** Each connector turns its provider's codes into the same few, so a merchant's
+  handling doesn't change with the provider; the provider's own reason is in the gateway's log.
+- **A provider's report is a reason to ask.** A webhook from a provider, like the browser back from 3-D Secure,
+  starts a lookup instead of being taken as the outcome: the provider's answer is the one fact, whatever arrives
+  late, twice or out of order.
 - **422 for a reused Idempotency-Key**, as the IETF Idempotency-Key draft says: retrying won't help, unlike a 409.
 - **One clock.** All timestamps come from the `Clock` bean, truncated to microseconds like PostgreSQL's, so a
   payment returned right away equals the one read back later.
@@ -143,11 +183,16 @@ the second one.
 | `GATEWAY_DEMO_MERCHANT_API_KEY`                 | empty: no demo merchant | the demo merchant's API key, 24+ characters                |
 | `GATEWAY_DEMO_MERCHANT_WEBHOOK_URL`, `_SECRET`  | empty: no webhooks      | the demo merchant's webhook endpoint and `whsec_` secret   |
 | `ACQUIRER_SIM_URL`, `ACQUIRER_SIM_API_KEY`      | localhost:8091, none    | where acquirer-sim is, and its key                         |
+| `GATEWAY_PROVIDER`                              | acquirer-sim            | the provider new payments are charged with                 |
+| `GATEWAY_MONOBANK_TOKEN`                        | empty: not configured   | the merchant's monobank token (X-Token); a test token works |
+| `GATEWAY_MONOBANK_WEBHOOK_URL`                  | empty: no webhooks      | this gateway's `/providers/monobank/webhooks`, as monobank reaches it |
+| `MONOBANK_URL`                                  | https://api.monobank.ua | where monobank's API is                                    |
 | `gateway.payments.first-check-after`            | 30s                     | the first lookup of a payment left `PROCESSING`            |
 | `gateway.payments.check-interval`               | 10s                     | how often the checker runs                                 |
 | `gateway.payments.challenge-check-interval`     | 1m                      | how often a payment waiting for its challenge is looked up |
 | `gateway.payments.give-up-after`                | 10m                     | when a charge the provider has no record of fails          |
 | `gateway.providers.acquirer-sim.read-timeout`   | 5s                      | longer than the connect timeout, by a startup check        |
+| `gateway.providers.monobank.read-timeout`       | 10s                     | the same for monobank                                      |
 | `gateway.webhooks.dispatch-interval`            | 1s                      | how often the outbox is looked at                          |
 | `gateway.webhooks.read-timeout`                 | 15s                     | how long a merchant's endpoint has to answer               |
 | `gateway.webhooks.retry-delays`                 | 5s, 5m, 30m, 2h, 5h, 10h | the waits before each retry; then the event is given up   |

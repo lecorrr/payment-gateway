@@ -5,8 +5,8 @@
 
 A card payment gateway for merchants. A merchant sends a card payment to one REST API; the gateway charges it with
 a payment provider, records the outcome, tells the merchant by a signed webhook, and never stores the card number.
-The provider in this version is **acquirer-sim**, a simulated card acquirer, and **merchant-sim** plays the shop.
-Both live in this repository, so everything runs locally.
+It has two providers: **acquirer-sim**, a simulated card acquirer, and **monobank**'s acquiring API. acquirer-sim
+and **merchant-sim**, which plays the shop, live in this repository, so everything runs locally.
 
 What it does:
 
@@ -24,6 +24,9 @@ What it does:
   challenges left unfinished. Several instances can run it side by side (`FOR UPDATE SKIP LOCKED`).
 - **Tells "not charged" from "don't know".** A refused request or a connection that never opened fails the payment;
   a 5xx, a read timeout or a dropped connection leaves it `PROCESSING` for the checker.
+- **One API, several providers.** Each provider sits behind a connector that turns its API, its statuses and its
+  error codes into the gateway's, so a merchant sees the same decline codes whichever provider charged the card. A
+  setting picks the provider for new payments; every payment is looked up with the provider that charged it.
 - **Keeps card data out.** Luhn and expiry checks up front; the card number, CVC and holder are never stored,
   logged or sent in a webhook, and tests check the database rows, the log output and the webhook bodies for them.
 - **Contract first.** The API and the webhook body are written in OpenAPI and their Java types are generated from
@@ -116,11 +119,12 @@ CVC `000` is declined with `incorrect_cvc`. A challenge left open for 15 minutes
 
 ## API
 
-| Request                         | Answer                                                                          |
-|---------------------------------|---------------------------------------------------------------------------------|
-| `POST /api/v1/payments`         | 201 with `Location`; 200 and `Idempotent-Replayed: true` for a repeated request |
-| `GET /api/v1/payments/{id}`     | 200, or 404 for an unknown id or another merchant's payment                     |
-| `GET /3ds/return/{id}`          | for the customer's browser after 3-D Secure: 303 to the payment's `returnUrl`   |
+| Request                             | Answer                                                                          |
+|-------------------------------------|---------------------------------------------------------------------------------|
+| `POST /api/v1/payments`             | 201 with `Location`; 200 and `Idempotent-Replayed: true` for a repeated request |
+| `GET /api/v1/payments/{id}`         | 200, or 404 for an unknown id or another merchant's payment                     |
+| `GET /3ds/return/{id}`              | for the customer's browser after 3-D Secure: 303 to the payment's `returnUrl`   |
+| `POST /providers/monobank/webhooks` | for monobank, when an invoice changes: 200 once its signature checks out        |
 
 The first two need `X-Api-Key`; the POST also needs `Idempotency-Key`. A payment is `PROCESSING`, or
 `REQUIRES_ACTION` with a `nextAction` while the customer is at the challenge, until it is `SUCCEEDED`, `DECLINED` or
@@ -156,10 +160,32 @@ in merchant-sim shows how. Any 2xx answer counts as delivered. Anything else, a 
 5 s, 5 min, 30 min, 2 h, 5 h and 10 h, each with up to a tenth more at random, then given up; 410 Gone is given up
 at once. Webhooks can come twice and out of order, so go by the payment's `status` and `updatedAt`.
 
+## Providers
+
+**acquirer-sim** is the default, and the demo above uses it. **monobank** charges through monobank's acquiring API
+with the card's details (`payment-direct`): the payment's id goes as the invoice's reference, 3-D Secure sends the
+customer to monobank's `tdsUrl` and back to `/3ds/return/{id}`, and monobank's error codes become the gateway's
+decline codes. A charge whose answer was lost has no invoice id at the gateway yet, so the checker first finds it in
+monobank's statement by its reference. When monobank can reach the gateway, it also reports invoice changes to
+`/providers/monobank/webhooks`; the gateway checks each report's ECDSA signature against monobank's public key and
+then looks the payment up, rather than taking the report's word.
+
+To try it, add these two lines to `.env`, with your token, and run `docker compose up -d` again:
+
+```
+GATEWAY_PROVIDER=monobank
+GATEWAY_MONOBANK_TOKEN=
+```
+
+A test token from [api.monobank.ua](https://api.monobank.ua/) charges nothing: monobank accepts any card number that
+passes the Luhn check and authorizes no money. monobank opens `payment-direct` only to merchants with a PCI DSS
+certificate, so whether a token may use it is monobank's call; a refused request ends the payment as `FAILED` with
+`provider_rejected_request`. The connector's tests run against WireMock with monobank's documented answers.
+
 ## Layout
 
 ```
-gateway-service/   the merchant API, 3-D Secure return, webhooks
+gateway-service/   the merchant API, 3-D Secure return, webhooks, the acquirer-sim and monobank connectors
 acquirer-sim/      the simulated card acquirer with its challenge pages, a separate app with its own API
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
 ci/                scripts for the pipeline
@@ -177,5 +203,5 @@ other modules' too.
 
 ## Next
 
-A monobank acquiring connector in test mode; routing between providers with failover; refunds; a Helm chart for
-several environments.
+Routing between providers with failover (Resilience4j, with the circuit state in Redis); refunds; metrics and
+tracing; a Helm chart for several environments.

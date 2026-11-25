@@ -20,6 +20,15 @@ class ProviderResultTest {
     }
 
     @Test
+    void shouldKeepProviderReferenceWhilePending() {
+        ProviderResult result = ProviderResult.pending("p2_1");
+
+        assertThat(result.outcome()).isEqualTo(Outcome.PENDING);
+        assertThat(result.providerReference()).isEqualTo("p2_1");
+        assertThat(result.actionUrl()).isNull();
+    }
+
+    @Test
     void shouldHaveActionUrlWithRequiresActionAndNothingElse() {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> new ProviderResult(Outcome.REQUIRES_ACTION, "ch_1", null, null));

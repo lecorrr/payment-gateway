@@ -19,6 +19,7 @@ import dev.tkachuk.gateway.card.CardExpiry;
 import dev.tkachuk.gateway.card.CardNumber;
 import dev.tkachuk.gateway.card.Cvc;
 import dev.tkachuk.gateway.common.Currency;
+import dev.tkachuk.gateway.provider.ChargeLookup;
 import dev.tkachuk.gateway.provider.ChargeRequest;
 import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderResult;
@@ -26,6 +27,7 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.URI;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -41,6 +43,9 @@ class AcquirerSimConnectorTest {
     private static final UUID REFERENCE = UUID.fromString("7f1c2b3a-0000-4000-8000-000000000001");
     private static final String RETURN_URL = "http://gateway.test/3ds/return/" + REFERENCE;
     private static final String ACTION_URL = "http://localhost:8091/challenge/ch_test_1";
+    // acquirer-sim finds a charge by the payment's id alone.
+    private static final ChargeLookup LOOKUP =
+            new ChargeLookup(REFERENCE, null, Instant.parse("2026-11-25T10:00:00Z"));
 
     private static WireMockServer acquirer;
 
@@ -150,7 +155,7 @@ class AcquirerSimConnectorTest {
                 .withQueryParam("reference", equalTo(REFERENCE.toString()))
                 .willReturn(charge(200, "approved", null)));
 
-        assertThat(connector.lookup(REFERENCE)).isEqualTo(ProviderResult.approved("ch_test_1"));
+        assertThat(connector.lookup(LOOKUP)).isEqualTo(ProviderResult.approved("ch_test_1"));
     }
 
     @Test
@@ -182,14 +187,14 @@ class AcquirerSimConnectorTest {
     void shouldLookUpChargeStillWaitingForChallenge() {
         acquirer.stubFor(get(urlPathEqualTo("/v1/charges")).willReturn(challenge(200, ACTION_URL)));
 
-        assertThat(connector.lookup(REFERENCE)).isEqualTo(ProviderResult.requiresAction("ch_test_1", ACTION_URL));
+        assertThat(connector.lookup(LOOKUP)).isEqualTo(ProviderResult.requiresAction("ch_test_1", ACTION_URL));
     }
 
     @Test
     void shouldReportChargeAcquirerDoesNotHave() {
         acquirer.stubFor(get(urlPathEqualTo("/v1/charges")).willReturn(aResponse().withStatus(404)));
 
-        assertThat(connector.lookup(REFERENCE)).isEqualTo(ProviderResult.notFound());
+        assertThat(connector.lookup(LOOKUP)).isEqualTo(ProviderResult.notFound());
     }
 
     @ParameterizedTest
@@ -197,7 +202,7 @@ class AcquirerSimConnectorTest {
     void shouldNotKnowWhenLookupFails(int status) {
         acquirer.stubFor(get(urlPathEqualTo("/v1/charges")).willReturn(aResponse().withStatus(status)));
 
-        assertThat(connector.lookup(REFERENCE)).isEqualTo(ProviderResult.unknown());
+        assertThat(connector.lookup(LOOKUP)).isEqualTo(ProviderResult.unknown());
     }
 
     private static AcquirerSimConnector connectorFor(String baseUrl) {

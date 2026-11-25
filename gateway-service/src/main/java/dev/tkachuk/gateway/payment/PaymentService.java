@@ -4,9 +4,12 @@ import dev.tkachuk.gateway.card.CardExpiry;
 import dev.tkachuk.gateway.card.CardNumber;
 import dev.tkachuk.gateway.common.error.ErrorCode;
 import dev.tkachuk.gateway.common.error.GatewayException;
+import dev.tkachuk.gateway.provider.ChargeLookup;
+import dev.tkachuk.gateway.provider.ChargeNotifications;
 import dev.tkachuk.gateway.provider.ChargeRequest;
 import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderConnector;
+import dev.tkachuk.gateway.provider.ProviderConnectors;
 import dev.tkachuk.gateway.provider.ProviderResult;
 import dev.tkachuk.gateway.provider.ProviderResult.Outcome;
 import dev.tkachuk.gateway.webhook.WebhookOutbox;
@@ -32,26 +35,27 @@ import org.springframework.transaction.support.TransactionTemplate;
  * outcome got lost or whose challenge was left unfinished. The provider is called outside any transaction; the
  * payment is stored as PROCESSING before the call, so a crash in between leaves a payment the checker finds, never
  * a charge the gateway doesn't know about. Every status change after that is stored together with its webhook event.
+ * New payments go to the active provider; each payment is looked up with the provider that charged it.
  */
 @Service
-public class PaymentService {
+public class PaymentService implements ChargeNotifications {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
 
     private final PaymentRepository payments;
     private final RequestFingerprints fingerprints;
-    private final ProviderConnector provider;
+    private final ProviderConnectors providers;
     private final WebhookOutbox webhooks;
     private final TransactionTemplate transactions;
     private final PaymentProperties properties;
     private final Clock clock;
 
-    PaymentService(PaymentRepository payments, RequestFingerprints fingerprints, ProviderConnector provider,
+    PaymentService(PaymentRepository payments, RequestFingerprints fingerprints, ProviderConnectors providers,
             WebhookOutbox webhooks, PlatformTransactionManager transactionManager, PaymentProperties properties,
             Clock clock) {
         this.payments = payments;
         this.fingerprints = fingerprints;
-        this.provider = provider;
+        this.providers = providers;
         this.webhooks = webhooks;
         this.transactions = new TransactionTemplate(transactionManager);
         this.properties = properties;
@@ -74,7 +78,8 @@ public class PaymentService {
         if (expiry.isExpiredOn(LocalDate.ofInstant(now, ZoneOffset.UTC))) {
             throw new GatewayException(ErrorCode.CARD_EXPIRED, "The card expired at the end of " + expiry);
         }
-        Payment payment = newPayment(merchantId, idempotencyKey, fingerprint, request, now);
+        ProviderConnector provider = providers.active();
+        Payment payment = newPayment(merchantId, idempotencyKey, fingerprint, request, provider.name(), now);
         if (!payments.insertIfAbsent(payment)) {
             // A request with the same key was stored between the lookup above and this insert.
             Payment first = payments.findByIdempotencyKey(merchantId, idempotencyKey).orElseThrow(
@@ -88,8 +93,9 @@ public class PaymentService {
                 request.card(), request.description(), challengeReturnUrl(payment.id())));
         Payment recorded = record(payment, result);
         if (recorded.status() == PaymentStatus.PROCESSING) {
-            log.info("Payment {} stays PROCESSING: {} gave no outcome; first check at {}", payment.id(),
-                    provider.name(), payment.nextCheckAt());
+            String why = result.outcome() == Outcome.PENDING ? "is still working on it" : "gave no outcome";
+            log.info("Payment {} stays PROCESSING: {} {}; first check at {}", payment.id(), provider.name(), why,
+                    payment.nextCheckAt());
         }
         return new PaymentResult(recorded, false);
     }
@@ -110,7 +116,28 @@ public class PaymentService {
         if (payment.status() != PaymentStatus.REQUIRES_ACTION) {
             return payment;
         }
-        return record(payment, provider.lookup(payment.id()));
+        return record(payment, lookup(payment));
+    }
+
+    /**
+     * A provider's webhook says the charge of this payment changed. The payment is looked up with the provider that
+     * charged it, unless it is finished already or another provider charged it.
+     */
+    @Override
+    public void chargeChanged(String provider, UUID paymentId) {
+        Optional<Payment> found = payments.findById(paymentId);
+        if (found.isEmpty()) {
+            log.warn("{} reports a change to payment {}, which the gateway does not have", provider, paymentId);
+            return;
+        }
+        Payment payment = found.get();
+        if (!payment.provider().equals(provider)) {
+            log.warn("{} reports a change to payment {}, which {} charged", provider, paymentId, payment.provider());
+            return;
+        }
+        if (!payment.status().isFinal()) {
+            record(payment, lookup(payment));
+        }
     }
 
     /**
@@ -124,7 +151,7 @@ public class PaymentService {
         List<Payment> due = payments.claimDue(now, now.plus(properties.checkInterval()),
                 now.plus(properties.challengeCheckInterval()), properties.checkBatchSize());
         for (Payment payment : due) {
-            ProviderResult result = provider.lookup(payment.id());
+            ProviderResult result = lookup(payment);
             boolean givingUp = result.outcome() == Outcome.NOT_FOUND
                     && !now.isBefore(payment.createdAt().plus(properties.giveUpAfter()));
             if (givingUp) {
@@ -137,13 +164,25 @@ public class PaymentService {
     }
 
     private Payment newPayment(UUID merchantId, String idempotencyKey, String fingerprint, NewPayment request,
-            Instant now) {
+            String provider, Instant now) {
         CardNumber number = request.card().number();
         String returnUrl = request.returnUrl() == null ? null : request.returnUrl().toString();
         return new Payment(UUID.randomUUID(), merchantId, idempotencyKey, fingerprint, request.orderId(),
                 request.amount(), request.currency(), request.description(), returnUrl, PaymentStatus.PROCESSING,
-                number.brand(), number.bin(), number.last4(), provider.name(), null, null, null,
+                number.brand(), number.bin(), number.last4(), provider, null, null, null,
                 now.plus(properties.firstCheckAfter()), now, now);
+    }
+
+    // A payment whose provider this gateway no longer has can't be looked up; it waits, and the log says why.
+    private ProviderResult lookup(Payment payment) {
+        Optional<ProviderConnector> provider = providers.byName(payment.provider());
+        if (provider.isEmpty()) {
+            log.error("Payment {} was charged with {}, which this gateway has no connector for", payment.id(),
+                    payment.provider());
+            return ProviderResult.unknown();
+        }
+        return provider.get().lookup(new ChargeLookup(payment.id(), payment.providerReference(),
+                payment.createdAt()));
     }
 
     // The gateway's own page, which the provider sends the customer's browser to after the challenge.
@@ -159,15 +198,25 @@ public class PaymentService {
         return new PaymentResult(earlier, true);
     }
 
-    // Without an outcome (NOT_FOUND, UNKNOWN) the payment stays as it is until its next check.
+    // Without an outcome (PENDING, NOT_FOUND, UNKNOWN) the payment stays as it is until its next check.
     private Payment record(Payment payment, ProviderResult result) {
         return switch (result.outcome()) {
             case APPROVED -> finish(payment, PaymentStatus.SUCCEEDED, result.providerReference(), null);
             case DECLINED -> finish(payment, PaymentStatus.DECLINED, result.providerReference(), result.code());
             case FAILED -> finish(payment, PaymentStatus.FAILED, result.providerReference(), result.code());
             case REQUIRES_ACTION -> requireAction(payment, result.providerReference(), result.actionUrl());
+            case PENDING -> keepProviderReference(payment, result.providerReference());
             case NOT_FOUND, UNKNOWN -> payment;
         };
+    }
+
+    // A provider that is still working on a charge may have given it an id already; lookups ask by it from now on.
+    private Payment keepProviderReference(Payment payment, @Nullable String providerReference) {
+        if (providerReference == null || payment.providerReference() != null) {
+            return payment;
+        }
+        return payments.rememberProviderReference(payment.id(), providerReference, now())
+                .orElseGet(() -> current(payment));
     }
 
     private Payment finish(Payment payment, PaymentStatus status, @Nullable String providerReference,

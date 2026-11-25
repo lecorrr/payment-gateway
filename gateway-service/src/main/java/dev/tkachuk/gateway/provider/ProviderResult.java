@@ -4,9 +4,8 @@ import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
 /**
- * What a provider said about a charge. The code is the provider's decline code for DECLINED and one of
- * {@link FailureCodes} for FAILED; actionUrl, only with REQUIRES_ACTION, is where the customer passes the 3-D Secure
- * challenge.
+ * What a provider said about a charge. The code is a decline code for DECLINED and one of {@link FailureCodes} for
+ * FAILED; actionUrl, only with REQUIRES_ACTION, is where the customer passes the 3-D Secure challenge.
  */
 public record ProviderResult(Outcome outcome, @Nullable String providerReference, @Nullable String code,
         @Nullable String actionUrl) {
@@ -20,6 +19,8 @@ public record ProviderResult(Outcome outcome, @Nullable String providerReference
         FAILED,
         /** The card's bank wants the customer to pass a 3-D Secure challenge before it decides. */
         REQUIRES_ACTION,
+        /** The provider has the charge and hasn't decided yet; its reference, if any, is worth keeping. */
+        PENDING,
         /** From a lookup only: the provider has no charge with this reference. */
         NOT_FOUND,
         /** No answer, or one that can't be read: the card may or may not have been charged. */
@@ -47,6 +48,10 @@ public record ProviderResult(Outcome outcome, @Nullable String providerReference
 
     public static ProviderResult requiresAction(String providerReference, String actionUrl) {
         return new ProviderResult(Outcome.REQUIRES_ACTION, providerReference, null, actionUrl);
+    }
+
+    public static ProviderResult pending(String providerReference) {
+        return new ProviderResult(Outcome.PENDING, providerReference, null, null);
     }
 
     public static ProviderResult notFound() {

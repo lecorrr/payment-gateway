@@ -1,34 +1,34 @@
 package dev.tkachuk.gateway.provider.acquirersim;
 
+import static dev.tkachuk.gateway.provider.ProviderHttp.describe;
+import static dev.tkachuk.gateway.provider.ProviderHttp.isHttpUrl;
+import static dev.tkachuk.gateway.provider.ProviderHttp.neverConnected;
+
+import dev.tkachuk.gateway.provider.ChargeLookup;
 import dev.tkachuk.gateway.provider.ChargeRequest;
 import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderConnector;
+import dev.tkachuk.gateway.provider.ProviderHttp;
 import dev.tkachuk.gateway.provider.ProviderResult;
-import java.net.ConnectException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.http.HttpClient;
-import java.net.http.HttpConnectTimeoutException;
 import java.util.UUID;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestClientResponseException;
 
 /**
  * acquirer-sim, the simulated card acquirer in this repository, over its REST API. What matters most is telling
  * "not charged" from "don't know": a 4xx or a connection that never opened is FAILED, while a 5xx, a read timeout or
  * an unreadable answer is UNKNOWN, and the payment waits for a lookup. "requires_action" is a 3-D Secure challenge,
- * passed on with the challenge's URL.
+ * passed on with the challenge's URL. Charges are looked up by the payment's id, which acquirer-sim keeps as their
+ * reference.
  */
 @Component
 class AcquirerSimConnector implements ProviderConnector {
@@ -40,15 +40,9 @@ class AcquirerSimConnector implements ProviderConnector {
     private final RestClient restClient;
 
     AcquirerSimConnector(RestClient.Builder restClientBuilder, AcquirerSimProperties properties) {
-        HttpClient httpClient = HttpClient.newBuilder()
-                .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(properties.connectTimeout())
-                .build();
-        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
-        requestFactory.setReadTimeout(properties.readTimeout());
-        this.restClient = restClientBuilder
+        this.restClient = ProviderHttp.withTimeouts(restClientBuilder, properties.connectTimeout(),
+                        properties.readTimeout())
                 .baseUrl(properties.baseUrl())
-                .requestFactory(requestFactory)
                 .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.apiKey())
                 .build();
     }
@@ -90,7 +84,8 @@ class AcquirerSimConnector implements ProviderConnector {
     }
 
     @Override
-    public ProviderResult lookup(UUID reference) {
+    public ProviderResult lookup(ChargeLookup lookup) {
+        UUID reference = lookup.reference();
         try {
             SimCharge charge = restClient.get()
                     .uri("/v1/charges?reference={reference}", reference)
@@ -129,39 +124,5 @@ class AcquirerSimConnector implements ProviderConnector {
             return ProviderResult.unknown();
         }
         return ProviderResult.requiresAction(chargeId, actionUrl);
-    }
-
-    private static boolean isHttpUrl(String url) {
-        try {
-            URI uri = new URI(url);
-            return ("http".equals(uri.getScheme()) || "https".equals(uri.getScheme())) && uri.getHost() != null;
-        } catch (URISyntaxException e) {
-            return false;
-        }
-    }
-
-    // Connection refused, an unknown host or a connect timeout: the request never left this machine. Anything
-    // later, such as a read timeout or a dropped connection, can happen after the acquirer got the request.
-    private static boolean neverConnected(ResourceAccessException e) {
-        for (Throwable cause = e.getCause(); cause != null; cause = cause.getCause()) {
-            if (cause instanceof ConnectException || cause instanceof HttpConnectTimeoutException) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // An HTTP error by its status only, since its message quotes the response body; an I/O error by its type, since
-    // some have no message at all (a refused connection).
-    private static String describe(RestClientException e) {
-        if (e instanceof RestClientResponseException response) {
-            return "HTTP " + response.getStatusCode().value();
-        }
-        Throwable cause = e.getCause();
-        if (e instanceof ResourceAccessException && cause != null) {
-            String type = cause.getClass().getSimpleName();
-            return cause.getMessage() == null ? type : type + ": " + cause.getMessage();
-        }
-        return e.getMessage();
     }
 }

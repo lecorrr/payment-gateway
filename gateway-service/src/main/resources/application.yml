@@ -45,11 +45,20 @@ gateway:
       - 5h
       - 10h
   providers:
+    # Where new payments are charged: acquirer-sim or monobank. A payment is always looked up where it was charged.
+    active: ${GATEWAY_PROVIDER:acquirer-sim}
     acquirer-sim:
       base-url: ${ACQUIRER_SIM_URL:http://localhost:8091}
       api-key: ${ACQUIRER_SIM_API_KEY:}
       connect-timeout: 2s
       read-timeout: 5s
+    monobank:
+      base-url: ${MONOBANK_URL:https://api.monobank.ua}
+      token: ${GATEWAY_MONOBANK_TOKEN:}
+      # This gateway's /providers/monobank/webhooks as monobank can reach it; empty for no webhooks.
+      webhook-url: ${GATEWAY_MONOBANK_WEBHOOK_URL:}
+      connect-timeout: 2s
+      read-timeout: 10s
 
 management:
   endpoints:
