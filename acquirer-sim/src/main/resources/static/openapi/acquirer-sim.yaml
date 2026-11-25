@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: acquirer-sim
-  version: 0.1.1
+  version: 0.1.2
   description: >-
     A simulated card acquirer for running payment-gateway without a real one. Charges are kept in memory and decided
     by the card number:

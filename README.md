@@ -1,5 +1,8 @@
 # payment-gateway
 
+[![pipeline](https://gitlab.com/lecorrr/payment-gateway/badges/main/pipeline.svg)](https://gitlab.com/lecorrr/payment-gateway/-/pipelines?ref=main)
+[![gateway-service coverage](https://gitlab.com/lecorrr/payment-gateway/badges/main/coverage.svg?job=verify&key_text=gateway+coverage&key_width=110)](https://gitlab.com/lecorrr/payment-gateway/-/pipelines?ref=main)
+
 A card payment gateway for merchants. A merchant sends a card payment to one REST API; the gateway charges it with
 a payment provider, records the outcome, and never stores the card number. The provider in this version is
 **acquirer-sim**, a simulated card acquirer that lives in this repository, so everything runs locally.
@@ -62,11 +65,18 @@ Needs Java 21 and Docker.
    ```
 
    ```bash
-   curl -s -X POST http://localhost:8090/api/v1/payments -H "X-Api-Key: $KEY" -H "Idempotency-Key: order-1001-1" -H "Content-Type: application/json" -d '{"orderId": "ORDER-1001", "amount": 15000, "currency": "UAH", "description": "Two tickets", "card": {"number": "4111 1111 1111 1111", "expiryMonth": 12, "expiryYear": 2030, "cvc": "123"}}'
+   curl -s -w '\n' -X POST http://localhost:8090/api/v1/payments -H "X-Api-Key: $KEY" -H "Idempotency-Key: order-1001-1" -H "Content-Type: application/json" -d '{"orderId": "ORDER-1001", "amount": 15000, "currency": "UAH", "description": "Two tickets", "card": {"number": "4111 1111 1111 1111", "expiryMonth": 12, "expiryYear": 2030, "cvc": "123"}}'
    ```
 
    Send the same command again: same payment, HTTP 200 and `Idempotent-Replayed: true`. Change the amount and keep
    the key: 422 `IDEMPOTENCY_KEY_REUSED`.
+
+5. Read a payment back by the `id` from the answer, for example to watch the slow test card go from `PROCESSING`
+   to `SUCCEEDED`:
+
+   ```bash
+   curl -s -w '\n' http://localhost:8090/api/v1/payments/PAYMENT_ID -H "X-Api-Key: $KEY"
+   ```
 
 The API docs are at http://localhost:8090/swagger-ui.html (use **Authorize** with the key), acquirer-sim's at
 http://localhost:8091/swagger-ui.html. Stop everything with `docker compose down`.
@@ -120,8 +130,10 @@ How the parts fit, and why: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## CI
 
-The repository lives on GitLab, where every push runs the tests, the coverage gate and the image builds on a
-self-hosted runner ([docs/gitlab-setup.md](docs/gitlab-setup.md)); the GitHub copy is a mirror.
+The repository lives on [GitLab](https://gitlab.com/lecorrr/payment-gateway), where every push runs the tests, the
+coverage gate and the image builds on a self-hosted runner ([docs/gitlab-setup.md](docs/gitlab-setup.md)). The
+GitHub copy is a mirror of it. The coverage badge shows gateway-service's line coverage; the pipeline log has
+acquirer-sim's too.
 
 ## Next
 

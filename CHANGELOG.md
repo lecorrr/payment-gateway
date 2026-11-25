@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 (2026-11-25)
+
+- README: pipeline and coverage badges from GitLab, the curl examples end their output with a new line, and an
+  example of reading a payment back.
+- `docs/gitlab-setup.md` follows the setup as it was actually done: a protected runner locked to the project,
+  replacing a runner token that got out with `reset-token`, checking GitLab's SSH host key, and a GitHub mirror token
+  limited to this repository.
+
 ## 0.1.1 (2026-11-25)
 
 - The demo's host ports can be moved in `.env` (`GATEWAY_PORT`, `ACQUIRER_SIM_PORT`, `GATEWAY_DB_PORT`), for

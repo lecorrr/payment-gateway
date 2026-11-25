@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: payment-gateway merchant API
-  version: 0.1.1
+  version: 0.1.2
   description: >-
     Card payments for merchants. A merchant sends the card once; the gateway passes it to a payment provider,
     keeps only the brand, the first six and the last four digits, and answers with the payment's status.
