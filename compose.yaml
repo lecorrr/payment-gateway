@@ -1,5 +1,6 @@
 # The gateway, the simulated acquirer and PostgreSQL for a local demo. Ports are published on localhost only.
 # Build the jars first (./mvnw package) and make the .env file as the README shows: without it compose won't start.
+# A host port that is taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT, GATEWAY_DB_PORT.
 name: payment-gateway
 
 services:
@@ -10,7 +11,8 @@ services:
       POSTGRES_USER: gateway
       POSTGRES_PASSWORD: gateway
     ports:
-      # 5436 by default, since 5432 and the next few are often taken; the gateway reads GATEWAY_DB_PORT too.
+      # 5436 by default, since 5432 and the next few are often taken; the gateway run outside Docker reads
+      # GATEWAY_DB_PORT too.
       - "127.0.0.1:${GATEWAY_DB_PORT:-5436}:5432"
     volumes:
       - gateway-db:/var/lib/postgresql/data
@@ -26,7 +28,7 @@ services:
     environment:
       ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
     ports:
-      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:${ACQUIRER_SIM_PORT:-8091}:8091"
 
   gateway:
     build: ./gateway-service
@@ -43,7 +45,7 @@ services:
       GATEWAY_FINGERPRINT_KEY: ${GATEWAY_FINGERPRINT_KEY:?make the .env file first, see the README}
       GATEWAY_DEMO_MERCHANT_API_KEY: ${GATEWAY_DEMO_MERCHANT_API_KEY:?make the .env file first, see the README}
     ports:
-      - "127.0.0.1:8090:8090"
+      - "127.0.0.1:${GATEWAY_PORT:-8090}:8090"
 
 volumes:
   gateway-db:

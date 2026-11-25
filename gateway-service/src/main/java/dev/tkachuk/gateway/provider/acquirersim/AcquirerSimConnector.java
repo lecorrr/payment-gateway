@@ -75,10 +75,10 @@ class AcquirerSimConnector implements ProviderConnector {
             return ProviderResult.unknown();
         } catch (ResourceAccessException e) {
             if (neverConnected(e)) {
-                log.warn("acquirer-sim is unreachable, so payment {} was not sent: {}", reference, e.getMessage());
+                log.warn("acquirer-sim is unreachable, so payment {} was not sent: {}", reference, describe(e));
                 return ProviderResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
             }
-            log.warn("No answer from acquirer-sim for payment {}: {}", reference, e.getMessage());
+            log.warn("No answer from acquirer-sim for payment {}: {}", reference, describe(e));
             return ProviderResult.unknown();
         } catch (RestClientException e) {
             log.warn("acquirer-sim's answer for payment {} could not be read: {}", reference, describe(e));
@@ -128,10 +128,17 @@ class AcquirerSimConnector implements ProviderConnector {
         return false;
     }
 
-    // The status only: the message of a status exception quotes the response body.
+    // An HTTP error by its status only, since its message quotes the response body; an I/O error by its type, since
+    // some have no message at all (a refused connection).
     private static String describe(RestClientException e) {
-        return e instanceof RestClientResponseException response
-                ? "HTTP " + response.getStatusCode().value()
-                : e.getMessage();
+        if (e instanceof RestClientResponseException response) {
+            return "HTTP " + response.getStatusCode().value();
+        }
+        Throwable cause = e.getCause();
+        if (e instanceof ResourceAccessException && cause != null) {
+            String type = cause.getClass().getSimpleName();
+            return cause.getMessage() == null ? type : type + ": " + cause.getMessage();
+        }
+        return e.getMessage();
     }
 }

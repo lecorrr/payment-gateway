@@ -42,6 +42,13 @@ Needs Java 21 and Docker.
    printf 'GATEWAY_DEMO_MERCHANT_API_KEY=%s\nGATEWAY_FINGERPRINT_KEY=%s\nACQUIRER_SIM_API_KEY=%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)" "$(openssl rand -hex 16)" > .env
    ```
 
+   The demo uses ports 8090 (gateway), 8091 (acquirer-sim) and 5436 (PostgreSQL) on localhost. If one is taken,
+   pick others in `.env` and use them in the URLs below, for example:
+
+   ```bash
+   printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nGATEWAY_DB_PORT=5446\n' >> .env
+   ```
+
 3. Start the gateway, acquirer-sim and PostgreSQL:
 
    ```bash

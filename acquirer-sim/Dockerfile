@@ -6,7 +6,7 @@ RUN groupadd --gid 10001 acquirer && useradd --uid 10001 --gid acquirer --no-cre
     --shell /usr/sbin/nologin acquirer
 
 WORKDIR /app
-COPY target/acquirer-sim-*.jar /app/acquirer-sim.jar
+COPY target/acquirer-sim.jar /app/acquirer-sim.jar
 USER 10001:10001
 
 EXPOSE 8091

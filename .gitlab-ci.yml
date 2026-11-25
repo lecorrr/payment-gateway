@@ -44,8 +44,8 @@ verify:
     when: always
     expire_in: 1 week
     paths:
-      - gateway-service/target/gateway-service-*.jar
-      - acquirer-sim/target/acquirer-sim-*.jar
+      - gateway-service/target/gateway-service.jar
+      - acquirer-sim/target/acquirer-sim.jar
       - "*/target/site/jacoco/"
     reports:
       junit:

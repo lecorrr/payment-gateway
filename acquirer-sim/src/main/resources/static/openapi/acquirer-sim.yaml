@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: acquirer-sim
-  version: 0.1.0
+  version: 0.1.1
   description: >-
     A simulated card acquirer for running payment-gateway without a real one. Charges are kept in memory and decided
     by the card number:
@@ -18,7 +18,8 @@ info:
 
     A past expiry month gives expired_card, CVC 000 gives incorrect_cvc.
 servers:
-  - url: http://localhost:8091
+  - url: /
+    description: The server this page comes from
 security:
   - Bearer: []
 

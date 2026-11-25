@@ -6,7 +6,7 @@ RUN groupadd --gid 10001 gateway && useradd --uid 10001 --gid gateway --no-creat
     --shell /usr/sbin/nologin gateway
 
 WORKDIR /app
-COPY target/gateway-service-*.jar /app/gateway-service.jar
+COPY target/gateway-service.jar /app/gateway-service.jar
 USER 10001:10001
 
 EXPOSE 8090

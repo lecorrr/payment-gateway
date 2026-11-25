@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.1.0</version>
+        <version>0.1.1</version>
     </parent>
 
     <artifactId>gateway-service</artifactId>
@@ -87,6 +87,8 @@
     </dependencies>
 
     <build>
+        <!-- No version in the jar's name: the Dockerfile copies this one file. -->
+        <finalName>gateway-service</finalName>
         <plugins>
             <!-- Contract first: the API interface and DTOs are generated from the OpenAPI file. -->
             <plugin>

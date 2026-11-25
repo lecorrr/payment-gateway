@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: payment-gateway merchant API
-  version: 0.1.0
+  version: 0.1.1
   description: >-
     Card payments for merchants. A merchant sends the card once; the gateway passes it to a payment provider,
     keeps only the brand, the first six and the last four digits, and answers with the payment's status.
@@ -10,7 +10,8 @@ info:
     Every call needs the merchant's API key in the `X-Api-Key` header. Amounts are integers in minor units
     (kopiyky, cents): 15000 with UAH is 150.00 UAH.
 servers:
-  - url: http://localhost:8090
+  - url: /
+    description: The server this page comes from
 tags:
   - name: Payments
     description: >-

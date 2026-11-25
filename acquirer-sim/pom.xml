@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.1.0</version>
+        <version>0.1.1</version>
     </parent>
 
     <artifactId>acquirer-sim</artifactId>
@@ -45,6 +45,8 @@
     </dependencies>
 
     <build>
+        <!-- No version in the jar's name: the Dockerfile copies this one file. -->
+        <finalName>acquirer-sim</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

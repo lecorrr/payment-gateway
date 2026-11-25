@@ -1,3 +1,3 @@
 # Only the jar goes into the image.
 *
-!target/gateway-service-*.jar
+!target/gateway-service.jar

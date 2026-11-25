@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 (2026-11-25)
+
+- The demo's host ports can be moved in `.env` (`GATEWAY_PORT`, `ACQUIRER_SIM_PORT`, `GATEWAY_DB_PORT`), for
+  machines where 8090, 8091 or 5436 is taken.
+- Both OpenAPI files use a relative server URL, so Swagger UI works on whatever port it is served from.
+- Jars are named without the version (`gateway-service.jar`), so the Dockerfiles copy one known file even when an
+  older jar is still in `target/`.
+- Connection errors in the log name their type: a refused connection logged `null` before.
+
 ## 0.1.0 (2026-11-25)
 
 - Merchant API: create a card payment and read it back, with API keys stored as hashes and payments visible only to
