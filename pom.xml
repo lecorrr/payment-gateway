@@ -13,7 +13,7 @@
 
     <groupId>dev.tkachuk</groupId>
     <artifactId>payment-gateway</artifactId>
-    <version>0.1.2</version>
+    <version>0.2.0</version>
     <packaging>pom</packaging>
     <name>payment-gateway</name>
     <description>Card payments for merchants through pluggable payment providers</description>
@@ -21,6 +21,7 @@
     <modules>
         <module>gateway-service</module>
         <module>acquirer-sim</module>
+        <module>merchant-sim</module>
     </modules>
 
     <properties>

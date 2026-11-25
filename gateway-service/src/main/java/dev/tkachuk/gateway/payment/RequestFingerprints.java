@@ -35,6 +35,11 @@ class RequestFingerprints {
         append(input, card.number().digits());
         append(input, card.expiry().toString());
         append(input, card.holder());
+        // Only when there is one, so a request without it keeps the fingerprint stored before returnUrl existed,
+        // and its replay still matches.
+        if (payment.returnUrl() != null) {
+            append(input, payment.returnUrl().toString());
+        }
         byte[] hash = newMac().doFinal(input.toString().getBytes(StandardCharsets.UTF_8));
         return HexFormat.of().formatHex(hash);
     }

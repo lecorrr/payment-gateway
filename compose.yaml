@@ -1,6 +1,7 @@
-# The gateway, the simulated acquirer and PostgreSQL for a local demo. Ports are published on localhost only.
-# Build the jars first (./mvnw package) and make the .env file as the README shows: without it compose won't start.
-# A host port that is taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT, GATEWAY_DB_PORT.
+# The gateway, the simulated acquirer, a simulated shop and PostgreSQL for a local demo. Ports are published on
+# localhost only. Build the jars first (./mvnw package) and make the .env file as the README shows: without it
+# compose won't start. A host port that is taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT,
+# MERCHANT_SIM_PORT, GATEWAY_DB_PORT.
 name: payment-gateway
 
 services:
@@ -27,8 +28,19 @@ services:
     image: acquirer-sim:local
     environment:
       ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
+      # The 3-D Secure challenge page is opened in your browser, so its link uses the published port.
+      SIM_PUBLIC_URL: http://localhost:${ACQUIRER_SIM_PORT:-8091}
     ports:
       - "127.0.0.1:${ACQUIRER_SIM_PORT:-8091}:8091"
+
+  merchant-sim:
+    build: ./merchant-sim
+    image: merchant-sim:local
+    environment:
+      MERCHANT_SIM_WEBHOOK_SECRET: ${GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET:?make the .env file first, see the README}
+      MERCHANT_SIM_FAIL_FIRST: ${MERCHANT_SIM_FAIL_FIRST:-0}
+    ports:
+      - "127.0.0.1:${MERCHANT_SIM_PORT:-8092}:8092"
 
   gateway:
     build: ./gateway-service
@@ -38,12 +50,18 @@ services:
         condition: service_healthy
       acquirer-sim:
         condition: service_started
+      merchant-sim:
+        condition: service_started
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/gateway
       ACQUIRER_SIM_URL: http://acquirer-sim:8091
       ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
       GATEWAY_FINGERPRINT_KEY: ${GATEWAY_FINGERPRINT_KEY:?make the .env file first, see the README}
       GATEWAY_DEMO_MERCHANT_API_KEY: ${GATEWAY_DEMO_MERCHANT_API_KEY:?make the .env file first, see the README}
+      # Webhooks go to merchant-sim inside the compose network; the browser comes back to the published port.
+      GATEWAY_DEMO_MERCHANT_WEBHOOK_URL: http://merchant-sim:8092/webhooks
+      GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET: ${GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET:?make the .env file first, see the README}
+      GATEWAY_PUBLIC_URL: http://localhost:${GATEWAY_PORT:-8090}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8090}:8090"
 

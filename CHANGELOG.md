@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 (2026-11-25)
+
+- 3-D Secure: a payment the card's bank wants confirmed is `REQUIRES_ACTION` with a `nextAction` link. The
+  customer's browser comes back to `/3ds/return/{id}`, the gateway settles the payment from the provider's answer
+  and sends the browser on to the request's new `returnUrl`. The checker settles challenges left unfinished.
+- Webhooks: every status a payment reaches after `PROCESSING` is written to an outbox in the same transaction, then
+  sent to the merchant's endpoint signed by the Standard Webhooks scheme, retried for about 18 hours and given up
+  after that, or at once on 410 Gone. Redirects are not followed.
+- acquirer-sim: test card 4000 0000 0000 3220 asks for a challenge on a page of its own, which passes, fails, or
+  expires after 15 minutes.
+- merchant-sim, a new app that plays the shop: it checks webhook signatures, deduplicates by `webhook-id`, shows the
+  page the customer returns to, and can fail deliveries on purpose to show the retries.
+- The pipeline tries again when fetching the repository or the cache fails, instead of failing the job.
+- Request fingerprints include the return URL; a request without one keeps the fingerprint it had, so replays of
+  older payments still match.
+
 ## 0.1.2 (2026-11-25)
 
 - README: pipeline and coverage badges from GitLab, the curl examples end their output with a new line, and an

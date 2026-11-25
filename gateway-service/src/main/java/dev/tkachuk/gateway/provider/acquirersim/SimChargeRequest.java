@@ -6,14 +6,20 @@ import dev.tkachuk.gateway.provider.ChargeRequest;
 import org.jspecify.annotations.Nullable;
 
 /** The body of acquirer-sim's POST /v1/charges, in its own (snake_case) names. */
-record SimChargeRequest(String reference, long amount, String currency, SimCard card, @Nullable String description) {
+record SimChargeRequest(
+        String reference,
+        long amount,
+        String currency,
+        SimCard card,
+        @Nullable String description,
+        @JsonProperty("return_url") String returnUrl) {
 
     static SimChargeRequest from(ChargeRequest request) {
         Card card = request.card();
         SimCard simCard = new SimCard(card.number().digits(), card.expiry().month().getMonthValue(),
                 card.expiry().month().getYear(), card.cvc().value(), card.holder());
         return new SimChargeRequest(request.reference().toString(), request.amount(), request.currency().name(),
-                simCard, request.description());
+                simCard, request.description(), request.returnUrl().toString());
     }
 
     record SimCard(

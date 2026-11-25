@@ -24,6 +24,7 @@ import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderResult;
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.net.URI;
 import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
@@ -38,6 +39,8 @@ class AcquirerSimConnectorTest {
 
     private static final String API_KEY = "test-acquirer-key-0123456789";
     private static final UUID REFERENCE = UUID.fromString("7f1c2b3a-0000-4000-8000-000000000001");
+    private static final String RETURN_URL = "http://gateway.test/3ds/return/" + REFERENCE;
+    private static final String ACTION_URL = "http://localhost:8091/challenge/ch_test_1";
 
     private static WireMockServer acquirer;
 
@@ -73,7 +76,7 @@ class AcquirerSimConnectorTest {
                         {"reference": "7f1c2b3a-0000-4000-8000-000000000001", "amount": 15000, "currency": "UAH",
                          "card": {"number": "4111111111111111", "exp_month": 12, "exp_year": 2030, "cvc": "123",
                                   "holder": "OLENA KOVALENKO"},
-                         "description": "Two tickets"}""")));
+                         "description": "Two tickets", "return_url": "%s"}""".formatted(RETURN_URL))));
     }
 
     @Test
@@ -151,6 +154,38 @@ class AcquirerSimConnectorTest {
     }
 
     @Test
+    void shouldPassOnChallengeWithItsUrl() {
+        acquirer.stubFor(post("/v1/charges").willReturn(challenge(201, ACTION_URL)));
+
+        assertThat(connector.charge(chargeRequest())).isEqualTo(ProviderResult.requiresAction("ch_test_1", ACTION_URL));
+    }
+
+    // Without a URL to send the customer to, the challenge can't go on; the lookup asks again later.
+    @ParameterizedTest
+    @ValueSource(strings = {"/challenge/ch_test_1", "javascript:alert(1)", "http:///challenge"})
+    void shouldNotKnowChallengeWithoutUsableUrl(String actionUrl) {
+        acquirer.stubFor(post("/v1/charges").willReturn(challenge(201, actionUrl)));
+
+        assertThat(connector.charge(chargeRequest())).isEqualTo(ProviderResult.unknown());
+    }
+
+    @Test
+    void shouldNotKnowChallengeWithoutUrl() {
+        acquirer.stubFor(post("/v1/charges").willReturn(aResponse().withStatus(201)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"id\": \"ch_test_1\", \"status\": \"requires_action\"}")));
+
+        assertThat(connector.charge(chargeRequest())).isEqualTo(ProviderResult.unknown());
+    }
+
+    @Test
+    void shouldLookUpChargeStillWaitingForChallenge() {
+        acquirer.stubFor(get(urlPathEqualTo("/v1/charges")).willReturn(challenge(200, ACTION_URL)));
+
+        assertThat(connector.lookup(REFERENCE)).isEqualTo(ProviderResult.requiresAction("ch_test_1", ACTION_URL));
+    }
+
+    @Test
     void shouldReportChargeAcquirerDoesNotHave() {
         acquirer.stubFor(get(urlPathEqualTo("/v1/charges")).willReturn(aResponse().withStatus(404)));
 
@@ -173,7 +208,7 @@ class AcquirerSimConnectorTest {
     private static ChargeRequest chargeRequest() {
         Card card = new Card(CardNumber.parse("4111111111111111"), CardExpiry.of(12, 2030), new Cvc("123"),
                 "OLENA KOVALENKO");
-        return new ChargeRequest(REFERENCE, 15000, Currency.UAH, card, "Two tickets");
+        return new ChargeRequest(REFERENCE, 15000, Currency.UAH, card, "Two tickets", URI.create(RETURN_URL));
     }
 
     // A charge as acquirer-sim answers it, with fields the gateway doesn't read.
@@ -187,5 +222,15 @@ class AcquirerSimConnectorTest {
                          "auth_code": "654321", "amount": 15000, "currency": "UAH",
                          "created_at": "2026-11-25T10:00:00Z"}"""
                         .formatted(REFERENCE, chargeStatus, declineCodeJson));
+    }
+
+    private static ResponseDefinitionBuilder challenge(int status, String actionUrl) {
+        return aResponse()
+                .withStatus(status)
+                .withHeader("Content-Type", "application/json")
+                .withBody("""
+                        {"id": "ch_test_1", "reference": "%s", "status": "requires_action", "action_url": "%s",
+                         "amount": 15000, "currency": "UAH", "created_at": "2026-11-25T10:00:00Z"}"""
+                        .formatted(REFERENCE, actionUrl));
     }
 }

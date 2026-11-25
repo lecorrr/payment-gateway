@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.LocalDate;
 import java.util.Optional;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -38,6 +39,13 @@ class IssuerTest {
     @ValueSource(strings = {"4111111111111111", "4000000000000002"})
     void shouldDeclineCvcOfZeros(String number) {
         assertThat(Issuer.declineCode(card(number, 12, 2030, "000"), TODAY)).contains("incorrect_cvc");
+    }
+
+    @Test
+    void shouldAskForChallengeOnlyForChallengeCard() {
+        assertThat(Issuer.needsChallenge(card(Issuer.CHALLENGE_CARD, 12, 2030, "123"))).isTrue();
+        assertThat(Issuer.needsChallenge(card("4111111111111111", 12, 2030, "123"))).isFalse();
+        assertThat(Issuer.declineCode(card(Issuer.CHALLENGE_CARD, 12, 2030, "123"), TODAY)).isEmpty();
     }
 
     private static ChargeRequest.Card card(String number, int expMonth, int expYear, String cvc) {

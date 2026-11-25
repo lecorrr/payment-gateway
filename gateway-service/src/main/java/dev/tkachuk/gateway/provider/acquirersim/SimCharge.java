@@ -9,5 +9,6 @@ import org.jspecify.annotations.Nullable;
 record SimCharge(
         @Nullable String id,
         @Nullable String status,
-        @JsonProperty("decline_code") @Nullable String declineCode) {
+        @JsonProperty("decline_code") @Nullable String declineCode,
+        @JsonProperty("action_url") @Nullable String actionUrl) {
 }

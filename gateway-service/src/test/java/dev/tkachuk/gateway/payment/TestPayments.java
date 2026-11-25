@@ -11,13 +11,14 @@ import java.time.Duration;
 final class TestPayments {
 
     static final String FINGERPRINT_KEY = "test-fingerprint-key-0123456789abcdef";
+    static final String PUBLIC_URL = "http://gateway.test";
 
     private TestPayments() {
     }
 
     static PaymentProperties properties() {
-        return new PaymentProperties(FINGERPRINT_KEY, Duration.ofSeconds(30), Duration.ofSeconds(10),
-                Duration.ofMinutes(10), 20);
+        return new PaymentProperties(FINGERPRINT_KEY, PUBLIC_URL, Duration.ofSeconds(30), Duration.ofSeconds(10),
+                Duration.ofMinutes(1), Duration.ofMinutes(10), 20);
     }
 
     static Card card() {
@@ -29,6 +30,6 @@ final class TestPayments {
     }
 
     static NewPayment request() {
-        return new NewPayment("ORDER-1001", 15000, Currency.UAH, "Two tickets", card());
+        return new NewPayment("ORDER-1001", 15000, Currency.UAH, "Two tickets", null, card());
     }
 }

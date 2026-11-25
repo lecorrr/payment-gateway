@@ -1,13 +1,17 @@
 package dev.tkachuk.gateway.support;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
+import com.github.tomakehurst.wiremock.client.WireMock;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
@@ -18,24 +22,33 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
 /**
- * The service against PostgreSQL in Testcontainers and WireMock as acquirer-sim, with short timings: the acquirer
- * times out after 700 ms, a payment is first looked up after 1 s and given up after 2 s. All integration tests share
- * this one context, so they share its containers too. Every test starts with no payments and only the demo merchant.
+ * The service against PostgreSQL in Testcontainers, with WireMock as acquirer-sim and as a merchant's webhook
+ * endpoint, and short timings: the acquirer times out after 700 ms, a payment is first looked up after 1 s and given
+ * up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms apart. All integration
+ * tests share this one context, so they share its containers too. Every test starts with no payments, no webhook
+ * events and only the demo merchant, which has no webhook endpoint.
  */
 @SpringBootTest(properties = {
         "gateway.demo-merchant.api-key=" + IntegrationTest.DEMO_API_KEY,
         "gateway.payments.fingerprint-key=test-fingerprint-key-0123456789abcdef",
+        "gateway.payments.public-url=" + IntegrationTest.PUBLIC_URL,
         "gateway.payments.first-check-after=1s",
         "gateway.payments.check-interval=200ms",
+        "gateway.payments.challenge-check-interval=300ms",
         "gateway.payments.give-up-after=2s",
         "gateway.providers.acquirer-sim.api-key=test-acquirer-key-0123456789",
         "gateway.providers.acquirer-sim.connect-timeout=300ms",
-        "gateway.providers.acquirer-sim.read-timeout=700ms"})
+        "gateway.providers.acquirer-sim.read-timeout=700ms",
+        "gateway.webhooks.dispatch-interval=100ms",
+        "gateway.webhooks.connect-timeout=300ms",
+        "gateway.webhooks.read-timeout=1s",
+        "gateway.webhooks.retry-delays=200ms,200ms"})
 @AutoConfigureMockMvc
-@Import({PostgresTestcontainer.class, AcquirerStub.class})
+@Import({PostgresTestcontainer.class, AcquirerStub.class, MerchantEndpointStub.class})
 public abstract class IntegrationTest {
 
     protected static final String DEMO_API_KEY = "test-demo-merchant-key-0123456789";
+    protected static final String PUBLIC_URL = "http://gateway.test";
     protected static final String VISA = "4111 1111 1111 1111";
     protected static final String MASTERCARD = "5555 5555 5555 4444";
 
@@ -46,13 +59,21 @@ public abstract class IntegrationTest {
     protected JdbcTemplate jdbc;
 
     @Autowired
+    @Qualifier("acquirer")
     protected WireMockServer acquirer;
 
+    @Autowired
+    @Qualifier("merchantEndpoint")
+    protected WireMockServer merchantEndpoint;
+
+    // The tables first, so the checker and the dispatcher have nothing left to send by the time the stubs are reset.
     @BeforeEach
     void startClean() {
-        acquirer.resetAll();
-        jdbc.execute("TRUNCATE payments");
+        jdbc.execute("TRUNCATE webhook_events, payments");
+        jdbc.update("DELETE FROM webhook_endpoints");
         jdbc.update("DELETE FROM merchants WHERE code <> 'demo-shop'");
+        acquirer.resetAll();
+        merchantEndpoint.resetAll();
     }
 
     protected ResultActions createPayment(String apiKey, String idempotencyKey, String body) throws Exception {
@@ -82,8 +103,23 @@ public abstract class IntegrationTest {
                           "holder": "OLENA KOVALENKO"}}""".formatted(cardNumber, expiryYear);
     }
 
+    /** A request whose customer's browser goes to returnUrl after a 3-D Secure challenge. */
+    protected static String paymentRequest(String cardNumber, String returnUrl) {
+        return """
+                {"orderId": "ORDER-1001", "amount": 15000, "currency": "UAH", "description": "Two tickets",
+                 "returnUrl": "%s",
+                 "card": {"number": "%s", "expiryMonth": 12, "expiryYear": 2099, "cvc": "123",
+                          "holder": "OLENA KOVALENKO"}}""".formatted(returnUrl, cardNumber);
+    }
+
     protected void acquirerAnswersCharge(ResponseDefinitionBuilder answer) {
         acquirer.stubFor(post("/v1/charges").willReturn(answer));
+    }
+
+    protected void acquirerAnswersLookup(String paymentId, ResponseDefinitionBuilder answer) {
+        acquirer.stubFor(WireMock.get(urlPathEqualTo("/v1/charges"))
+                .withQueryParam("reference", equalTo(paymentId))
+                .willReturn(answer));
     }
 
     /** A charge as acquirer-sim answers it; declineCode may be null. */
@@ -97,5 +133,16 @@ public abstract class IntegrationTest {
                          "auth_code": "654321", "amount": 15000, "currency": "UAH",
                          "created_at": "2026-11-25T10:00:00Z"}"""
                         .formatted(chargeStatus, declineCodeJson));
+    }
+
+    /** A charge waiting for the cardholder's 3-D Secure challenge at actionUrl, as acquirer-sim answers it. */
+    protected static ResponseDefinitionBuilder challenge(int status, String actionUrl) {
+        return aResponse()
+                .withStatus(status)
+                .withHeader("Content-Type", "application/json")
+                .withBody("""
+                        {"id": "ch_test_1", "reference": "any", "status": "requires_action", "action_url": "%s",
+                         "amount": 15000, "currency": "UAH", "created_at": "2026-11-25T10:00:00Z"}"""
+                        .formatted(actionUrl));
     }
 }

@@ -10,13 +10,17 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 
-/** POST /v1/charges. The reference is the caller's id for the charge: one charge per reference. */
+/**
+ * POST /v1/charges. The reference is the caller's id for the charge: one charge per reference. returnUrl is where
+ * the cardholder's browser goes after a 3-D Secure challenge.
+ */
 record ChargeRequest(
         @NotBlank @Size(max = 64) String reference,
         @NotNull @Positive Long amount,
         @NotNull @Pattern(regexp = "[A-Z]{3}") String currency,
         @NotNull @Valid Card card,
-        @Size(max = 140) String description) {
+        @Size(max = 140) String description,
+        @JsonProperty("return_url") @Size(max = 2048) @Pattern(regexp = "https?://\\S+") String returnUrl) {
 
     record Card(
             @NotNull @Pattern(regexp = "[0-9]{12,19}") String number,

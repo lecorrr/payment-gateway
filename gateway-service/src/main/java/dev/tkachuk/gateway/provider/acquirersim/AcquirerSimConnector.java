@@ -5,6 +5,8 @@ import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderConnector;
 import dev.tkachuk.gateway.provider.ProviderResult;
 import java.net.ConnectException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
 import java.util.UUID;
@@ -25,7 +27,8 @@ import org.springframework.web.client.RestClientResponseException;
 /**
  * acquirer-sim, the simulated card acquirer in this repository, over its REST API. What matters most is telling
  * "not charged" from "don't know": a 4xx or a connection that never opened is FAILED, while a 5xx, a read timeout or
- * an unreadable answer is UNKNOWN, and the payment waits for a lookup.
+ * an unreadable answer is UNKNOWN, and the payment waits for a lookup. "requires_action" is a 3-D Secure challenge,
+ * passed on with the challenge's URL.
  */
 @Component
 class AcquirerSimConnector implements ProviderConnector {
@@ -110,11 +113,31 @@ class AcquirerSimConnector implements ProviderConnector {
         return switch (charge.status()) {
             case "approved" -> ProviderResult.approved(charge.id());
             case "declined" -> ProviderResult.declined(charge.id(), charge.declineCode());
+            case "requires_action" -> requiresAction(charge.id(), charge.actionUrl(), reference);
             default -> {
                 log.warn("acquirer-sim answered for payment {} with an unknown status", reference);
                 yield ProviderResult.unknown();
             }
         };
+    }
+
+    // Without a URL the customer can't be sent to the challenge; the payment waits, and a lookup asks again.
+    private static ProviderResult requiresAction(String chargeId, @Nullable String actionUrl, UUID reference) {
+        if (actionUrl == null || !isHttpUrl(actionUrl)) {
+            log.warn("acquirer-sim asked for a 3-D Secure challenge for payment {} without a usable action_url",
+                    reference);
+            return ProviderResult.unknown();
+        }
+        return ProviderResult.requiresAction(chargeId, actionUrl);
+    }
+
+    private static boolean isHttpUrl(String url) {
+        try {
+            URI uri = new URI(url);
+            return ("http".equals(uri.getScheme()) || "https".equals(uri.getScheme())) && uri.getHost() != null;
+        } catch (URISyntaxException e) {
+            return false;
+        }
     }
 
     // Connection refused, an unknown host or a connect timeout: the request never left this machine. Anything

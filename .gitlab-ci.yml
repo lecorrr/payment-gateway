@@ -10,6 +10,11 @@ variables:
   MAVEN_USER_HOME: "$CI_PROJECT_DIR/.m2"
   MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
   MAVEN_CLI_OPTS: "--batch-mode --no-transfer-progress"
+  # A network hiccup while the runner fetches the repository or restores the cache is tried again, instead of
+  # failing the job before it starts.
+  GET_SOURCES_ATTEMPTS: "3"
+  RESTORE_CACHE_ATTEMPTS: "3"
+  ARTIFACT_DOWNLOAD_ATTEMPTS: "3"
   # Docker-in-Docker without TLS; Testcontainers finds the daemon through DOCKER_HOST.
   DOCKER_HOST: "tcp://docker:2375"
   DOCKER_TLS_CERTDIR: ""
@@ -37,7 +42,7 @@ verify:
       - .m2/
   script:
     - ./mvnw $MAVEN_CLI_OPTS verify
-    - bash ci/print-coverage.sh gateway-service acquirer-sim
+    - bash ci/print-coverage.sh gateway-service acquirer-sim merchant-sim
   # The gateway's line coverage, shown on the pipeline and merge request pages.
   coverage: '/gateway-service line coverage: \d+\.\d+%/'
   artifacts:
@@ -46,6 +51,7 @@ verify:
     paths:
       - gateway-service/target/gateway-service.jar
       - acquirer-sim/target/acquirer-sim.jar
+      - merchant-sim/target/merchant-sim.jar
       - "*/target/site/jacoco/"
     reports:
       junit:
@@ -66,3 +72,4 @@ images:
   script:
     - docker build --tag "gateway-service:$CI_COMMIT_SHORT_SHA" gateway-service
     - docker build --tag "acquirer-sim:$CI_COMMIT_SHORT_SHA" acquirer-sim
+    - docker build --tag "merchant-sim:$CI_COMMIT_SHORT_SHA" merchant-sim

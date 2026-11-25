@@ -25,8 +25,9 @@ class ApiKeyFilter extends OncePerRequestFilter {
 
     static final String HEADER = "X-Api-Key";
 
+    // /3ds/ is where customers' browsers come back from 3-D Secure challenges, without any key.
     private static final List<String> PUBLIC_PATH_PREFIXES = List.of(
-            "/actuator/", "/swagger-ui", "/v3/api-docs", "/openapi/");
+            "/actuator/", "/swagger-ui", "/v3/api-docs", "/openapi/", "/3ds/");
 
     private final MerchantRepository merchants;
     private final JsonMapper jsonMapper;

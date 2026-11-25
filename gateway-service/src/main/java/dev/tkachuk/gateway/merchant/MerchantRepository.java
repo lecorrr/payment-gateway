@@ -26,18 +26,20 @@ public class MerchantRepository {
                 .optional();
     }
 
-    /** Adds the merchant, or gives the one with this code the new name and key. */
-    public void save(String code, String name, String apiKeyHash, Instant now) {
-        jdbc.sql("""
+    /** Adds the merchant, or gives the one with this code the new name and key; returns the merchant's id. */
+    public UUID save(String code, String name, String apiKeyHash, Instant now) {
+        return jdbc.sql("""
                         INSERT INTO merchants (id, code, name, api_key_hash, created_at)
                         VALUES (:id, :code, :name, :apiKeyHash, :now)
-                        ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, api_key_hash = EXCLUDED.api_key_hash""")
+                        ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, api_key_hash = EXCLUDED.api_key_hash
+                        RETURNING id""")
                 .param("id", UUID.randomUUID())
                 .param("code", code)
                 .param("name", name)
                 .param("apiKeyHash", apiKeyHash)
                 .param("now", now.atOffset(ZoneOffset.UTC))
-                .update();
+                .query((row, rowNumber) -> row.getObject("id", UUID.class))
+                .single();
     }
 
     private static Merchant fromRow(ResultSet row, int rowNumber) throws SQLException {

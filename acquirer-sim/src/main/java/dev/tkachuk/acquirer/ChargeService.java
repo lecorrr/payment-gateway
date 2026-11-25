@@ -25,6 +25,8 @@ class ChargeService {
     record Result(Kind kind, Charge charge) {
     }
 
+    static final String CHALLENGE_PATH = "/challenge/";
+
     private static final Logger log = LoggerFactory.getLogger(ChargeService.class);
 
     private final ChargeStore store;
@@ -38,29 +40,35 @@ class ChargeService {
     }
 
     /**
-     * Decides and stores the charge. A repeat of the request with the same reference gets the stored charge; the
-     * same reference with a different request is a CONFLICT. The slow test card is stored first and answered late,
-     * so a caller that gave up waiting can still find it.
+     * Decides and stores the charge. A repeat of the request with the same reference gets the stored charge as it is
+     * now; the same reference with a different request is a CONFLICT. The slow test card is stored first and
+     * answered late, so a caller that gave up waiting can still find it. The challenge card waits for its 3-D Secure
+     * challenge at action_url.
      */
     Result charge(ChargeRequest request) {
-        Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        Instant now = now();
         Optional<String> declineCode = Issuer.declineCode(request.card(), LocalDate.ofInstant(now, ZoneOffset.UTC));
-        Charge charge = new Charge(
-                "ch_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24),
-                request.reference(),
-                declineCode.isPresent() ? Charge.DECLINED : Charge.APPROVED,
-                declineCode.orElse(null),
-                declineCode.isPresent() ? null : "%06d".formatted(ThreadLocalRandom.current().nextInt(1_000_000)),
-                request.amount(),
-                request.currency(),
-                now);
-        String requestHash = hashOf(request);
+        boolean challenge = declineCode.isEmpty() && Issuer.needsChallenge(request.card());
+        String id = "ch_" + UUID.randomUUID().toString().replace("-", "").substring(0, 24);
+        Charge charge;
+        if (declineCode.isPresent()) {
+            charge = new Charge(id, request.reference(), Charge.DECLINED, declineCode.get(), null, null,
+                    request.amount(), request.currency(), now);
+        } else if (challenge) {
+            charge = new Charge(id, request.reference(), Charge.REQUIRES_ACTION, null, null,
+                    properties.publicUrl() + CHALLENGE_PATH + id, request.amount(), request.currency(), now);
+        } else {
+            charge = new Charge(id, request.reference(), Charge.APPROVED, null, newAuthCode(), null,
+                    request.amount(), request.currency(), now);
+        }
+        StoredCharge toStore = challenge
+                ? new StoredCharge(charge, hashOf(request), request.returnUrl(), now.plus(properties.challengeTtl()))
+                : new StoredCharge(charge, hashOf(request), null, null);
 
-        StoredCharge stored = store.putIfAbsent(new StoredCharge(charge, requestHash));
-        if (stored.charge() != charge) {
-            return stored.requestHash().equals(requestHash)
-                    ? new Result(Kind.REPLAYED, stored.charge())
-                    : new Result(Kind.CONFLICT, stored.charge());
+        StoredCharge stored = store.putIfAbsent(toStore);
+        if (stored != toStore) {
+            Kind kind = stored.requestHash().equals(toStore.requestHash()) ? Kind.REPLAYED : Kind.CONFLICT;
+            return new Result(kind, current(stored).charge());
         }
         log.info("Charge {} for reference {}: {}{}", charge.id(), charge.reference(), charge.status(),
                 declineCode.map(code -> " (" + code + ")").orElse(""));
@@ -70,8 +78,67 @@ class ChargeService {
         return new Result(Kind.CREATED, charge);
     }
 
+    /** The charge with this reference as it is now: a challenge left open past its time is declined first. */
     Optional<Charge> find(String reference) {
-        return store.find(reference);
+        return store.find(reference).map(this::current).map(StoredCharge::charge);
+    }
+
+    /** The same, by the charge's id, with its return URL: for the challenge page. */
+    Optional<StoredCharge> findById(String chargeId) {
+        return store.findById(chargeId).map(this::current);
+    }
+
+    /**
+     * The cardholder passed or failed the challenge. A charge that is no longer waiting stays as it is, so the
+     * first outcome stands; empty if no charge has this id.
+     */
+    Optional<StoredCharge> completeChallenge(String chargeId, boolean passed) {
+        Optional<StoredCharge> found = store.findById(chargeId);
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        return store.update(found.get().charge().reference(), stored -> {
+            if (isExpired(stored)) {
+                return expire(stored);
+            }
+            if (!stored.charge().waitsForChallenge()) {
+                return stored;
+            }
+            Charge charge = passed
+                    ? stored.charge().approved(newAuthCode())
+                    : stored.charge().declined(Issuer.AUTHENTICATION_FAILED);
+            log.info("Charge {}: challenge {}, {}", charge.id(), passed ? "passed" : "failed", charge.status());
+            return stored.with(charge);
+        });
+    }
+
+    private StoredCharge current(StoredCharge stored) {
+        if (!isExpired(stored)) {
+            return stored;
+        }
+        return store.update(stored.charge().reference(), this::expireIfStillDue).orElse(stored);
+    }
+
+    // Runs under the store's lock, where the charge may have been finished since it was read.
+    private StoredCharge expireIfStillDue(StoredCharge stored) {
+        return isExpired(stored) ? expire(stored) : stored;
+    }
+
+    private StoredCharge expire(StoredCharge stored) {
+        log.info("Charge {}: challenge left open past {}, declined", stored.charge().id(), properties.challengeTtl());
+        return stored.with(stored.charge().declined(Issuer.AUTHENTICATION_EXPIRED));
+    }
+
+    private boolean isExpired(StoredCharge stored) {
+        return stored.charge().waitsForChallenge() && !now().isBefore(stored.challengeExpiresAt());
+    }
+
+    private Instant now() {
+        return clock.instant().truncatedTo(ChronoUnit.MILLIS);
+    }
+
+    private static String newAuthCode() {
+        return "%06d".formatted(ThreadLocalRandom.current().nextInt(1_000_000));
     }
 
     private void waitSlowDelay() {

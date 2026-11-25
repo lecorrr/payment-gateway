@@ -4,6 +4,7 @@ package dev.tkachuk.gateway.common.error;
 public enum ErrorCode {
     CARD_INVALID,
     CARD_EXPIRED,
+    RETURN_URL_INVALID,
     PAYMENT_NOT_FOUND,
     IDEMPOTENCY_KEY_REUSED
 }

@@ -7,7 +7,10 @@ server:
 
 sim:
   api-key: ${ACQUIRER_SIM_API_KEY:}
+  # How browsers reach acquirer-sim: the 3-D Secure challenge pages are linked with it.
+  public-url: ${SIM_PUBLIC_URL:http://localhost:8091}
   slow-delay: 15s   # longer than the gateway's read timeout, so its answer is lost
+  challenge-ttl: 15m
   max-charges: 10000
 
 management:

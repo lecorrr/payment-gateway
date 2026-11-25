@@ -5,31 +5,57 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SimPropertiesTest {
 
     private static final String KEY = "test-acquirer-key-0123456789";
+    private static final String URL = "http://localhost:8091";
+    private static final Duration TTL = Duration.ofMinutes(15);
 
     @Test
     void shouldNeedLongEnoughApiKey() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new SimProperties("short", Duration.ZERO, 10))
+                .isThrownBy(() -> new SimProperties("short", URL, Duration.ZERO, TTL, 10))
                 .withMessageContaining("ACQUIRER_SIM_API_KEY");
-        assertThatIllegalArgumentException().isThrownBy(() -> new SimProperties(null, Duration.ZERO, 10));
+        assertThatIllegalArgumentException().isThrownBy(() -> new SimProperties(null, URL, Duration.ZERO, TTL, 10));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"localhost:8091", "ftp://localhost"})
+    void shouldNeedHttpPublicUrl(String publicUrl) {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new SimProperties(KEY, publicUrl, Duration.ZERO, TTL, 10))
+                .withMessageContaining("public-url");
+    }
+
+    @Test
+    void shouldDropTrailingSlashOfPublicUrl() {
+        assertThat(new SimProperties(KEY, URL + "/", Duration.ZERO, TTL, 10).publicUrl()).isEqualTo(URL);
     }
 
     @Test
     void shouldRejectNegativeDelayAndEmptyStore() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new SimProperties(KEY, Duration.ofSeconds(-1), 10))
+                .isThrownBy(() -> new SimProperties(KEY, URL, Duration.ofSeconds(-1), TTL, 10))
                 .withMessageContaining("slow-delay");
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new SimProperties(KEY, Duration.ZERO, 0))
+                .isThrownBy(() -> new SimProperties(KEY, URL, Duration.ZERO, TTL, 0))
                 .withMessageContaining("max-charges");
     }
 
     @Test
+    void shouldNeedChallengeToStayOpenForAWhile() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new SimProperties(KEY, URL, Duration.ZERO, Duration.ZERO, 10))
+                .withMessageContaining("challenge-ttl");
+    }
+
+    @Test
     void shouldHideApiKey() {
-        assertThat(new SimProperties(KEY, Duration.ZERO, 10).toString()).doesNotContain(KEY);
+        assertThat(new SimProperties(KEY, URL, Duration.ZERO, TTL, 10).toString()).doesNotContain(KEY);
     }
 }

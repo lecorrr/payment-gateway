@@ -1,22 +1,29 @@
 openapi: 3.0.3
 info:
   title: acquirer-sim
-  version: 0.1.2
+  version: 0.2.0
   description: >-
     A simulated card acquirer for running payment-gateway without a real one. Charges are kept in memory and decided
     by the card number:
 
 
-    | Card number      | Result                                             |
-    |------------------|----------------------------------------------------|
-    | 4000000000000002 | declined, do_not_honor                             |
-    | 4000000000009995 | declined, insufficient_funds                       |
-    | 4000000000000119 | declined, processing_error                         |
-    | 4000000000000259 | approved, but answered only after sim.slow-delay   |
-    | any other        | approved (4111111111111111, 5555555555554444, ...) |
+    | Card number      | Result                                                                  |
+    |------------------|-------------------------------------------------------------------------|
+    | 4000000000000002 | declined, do_not_honor                                                  |
+    | 4000000000009995 | declined, insufficient_funds                                            |
+    | 4000000000000119 | declined, processing_error                                              |
+    | 4000000000000259 | approved, but answered only after sim.slow-delay                        |
+    | 4000000000003220 | requires_action: a 3-D Secure challenge at action_url decides           |
+    | any other        | approved (4111111111111111, 5555555555554444, ...)                      |
 
 
     A past expiry month gives expired_card, CVC 000 gives incorrect_cvc.
+
+
+    **3-D Secure.** A charge that requires_action waits for the cardholder at `action_url`, a page with two buttons
+    instead of a real bank's check. Passing it approves the charge, failing it declines it with
+    authentication_failed, and leaving it open past sim.challenge-ttl declines it with authentication_expired. Either
+    way the browser then goes to the charge's `return_url`; the caller finds the outcome with a lookup.
 servers:
   - url: /
     description: The server this page comes from
@@ -39,13 +46,13 @@ paths:
               $ref: '#/components/schemas/ChargeRequest'
       responses:
         '201':
-          description: Charged or declined
+          description: Charged, declined, or waiting for the cardholder's challenge
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Charge'
         '200':
-          description: The charge stored for this reference
+          description: The charge stored for this reference, as it is now
           content:
             application/json:
               schema:
@@ -67,7 +74,7 @@ paths:
             type: string
       responses:
         '200':
-          description: The charge
+          description: The charge as it is now
           content:
             application/json:
               schema:
@@ -76,6 +83,72 @@ paths:
           $ref: '#/components/responses/Error'
         '404':
           $ref: '#/components/responses/Error'
+
+  /challenge/{chargeId}:
+    parameters:
+      - name: chargeId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^ch_[0-9a-f]{24}$'
+    get:
+      operationId: showChallenge
+      summary: The 3-D Secure challenge page, for the cardholder's browser
+      security: []
+      responses:
+        '200':
+          description: The challenge, or how it ended
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: No charge has this id
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      operationId: completeChallenge
+      summary: Pass or fail the challenge; the page's buttons post this
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome:
+                  type: string
+                  enum: [pass, fail]
+      responses:
+        '303':
+          description: On to the charge's return_url
+          headers:
+            Location:
+              schema:
+                type: string
+        '200':
+          description: How the challenge ended, for a charge without a return_url
+          content:
+            text/html:
+              schema:
+                type: string
+        '400':
+          description: The outcome is neither pass nor fail
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: No charge has this id
+          content:
+            text/html:
+              schema:
+                type: string
 
 components:
   securitySchemes:
@@ -133,6 +206,12 @@ components:
         description:
           type: string
           maxLength: 140
+        return_url:
+          type: string
+          maxLength: 2048
+          pattern: '^https?://\S+$'
+          description: Where the cardholder's browser goes after a 3-D Secure challenge
+          example: http://localhost:8090/3ds/return/0b8c2f6e-3f1d-4a52-9a77-2f4c1e0d9b31
 
     Charge:
       type: object
@@ -145,7 +224,7 @@ components:
           type: string
         status:
           type: string
-          enum: [approved, declined]
+          enum: [approved, declined, requires_action]
         decline_code:
           type: string
           description: Only when declined
@@ -154,6 +233,10 @@ components:
           type: string
           description: Only when approved
           example: '482913'
+        action_url:
+          type: string
+          description: Only when requires_action, the challenge page for the cardholder's browser
+          example: http://localhost:8091/challenge/ch_3f9a1c2b7d4e5f6a7b8c9d0e
         amount:
           type: integer
           format: int64

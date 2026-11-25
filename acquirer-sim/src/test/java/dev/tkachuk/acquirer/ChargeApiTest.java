@@ -14,6 +14,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -26,6 +27,7 @@ import org.springframework.test.web.servlet.ResultActions;
 class ChargeApiTest {
 
     static final String API_KEY = "test-acquirer-key-0123456789";
+    static final String RETURN_URL = "http://gateway.test/3ds/return/any";
 
     @Autowired
     private MockMvc mockMvc;
@@ -93,6 +95,37 @@ class ChargeApiTest {
     }
 
     @Test
+    void shouldAskForChallengeOfChallengeCard() throws Exception {
+        String reference = newReference();
+
+        String body = charge(reference, Issuer.CHALLENGE_CARD, 15000)
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("requires_action"))
+                .andExpect(jsonPath("$.action_url")
+                        .value(matchesPattern("http://localhost:8091/challenge/ch_[0-9a-f]{24}")))
+                .andExpect(jsonPath("$.auth_code").doesNotExist())
+                .andReturn().getResponse().getContentAsString();
+
+        mockMvc.perform(get("/v1/charges").param("reference", reference).header("Authorization", "Bearer " + API_KEY))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("requires_action"))
+                .andExpect(jsonPath("$.action_url").value(JsonPath.<String>read(body, "$.action_url")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"localhost/return", "https://shop.example.com/a|b", "https:///no-host"})
+    void shouldRefuseReturnUrlThatIsNoUrl(String returnUrl) throws Exception {
+        mockMvc.perform(post("/v1/charges")
+                        .header("Authorization", "Bearer " + API_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(chargeBody(newReference(), Issuer.CHALLENGE_CARD, 15000, returnUrl)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("invalid_request"))
+                // "returnUrl" from bean validation, "return_url" from the URL check
+                .andExpect(jsonPath("$.message").value(containsString("return")));
+    }
+
+    @Test
     void shouldAnswerSlowCardLate() throws Exception {
         long start = System.nanoTime();
 
@@ -137,10 +170,14 @@ class ChargeApiTest {
     }
 
     private static String chargeBody(String reference, String number, long amount) {
+        return chargeBody(reference, number, amount, RETURN_URL);
+    }
+
+    private static String chargeBody(String reference, String number, long amount, String returnUrl) {
         return """
                 {"reference": "%s", "amount": %d, "currency": "UAH",
                  "card": {"number": "%s", "exp_month": 12, "exp_year": 2099, "cvc": "123", "holder": "OLENA KOVALENKO"},
-                 "description": "Two tickets"}""".formatted(reference, amount, number);
+                 "description": "Two tickets", "return_url": "%s"}""".formatted(reference, amount, number, returnUrl);
     }
 
     private static String newReference() {

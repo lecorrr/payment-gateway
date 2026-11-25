@@ -26,9 +26,10 @@ class LayeringTest {
     private static final Map<String, Set<String>> MAY_DEPEND_ON = Map.of(
             "common", Set.of(),
             "card", Set.of("common"),
-            "merchant", Set.of("common"),
+            "webhook", Set.of("common"),
+            "merchant", Set.of("common", "webhook"),
             "provider", Set.of("common", "card"),
-            "payment", Set.of("common", "card", "merchant", "provider", "api"));
+            "payment", Set.of("common", "card", "merchant", "provider", "webhook", "api"));
 
     private static List<SourceFile> sources;
 

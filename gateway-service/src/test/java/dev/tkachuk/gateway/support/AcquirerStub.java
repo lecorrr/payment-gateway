@@ -2,6 +2,7 @@ package dev.tkachuk.gateway.support;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.test.context.DynamicPropertyRegistrar;
@@ -18,7 +19,7 @@ public class AcquirerStub {
     }
 
     @Bean
-    DynamicPropertyRegistrar acquirerUrl(WireMockServer acquirer) {
+    DynamicPropertyRegistrar acquirerUrl(@Qualifier("acquirer") WireMockServer acquirer) {
         return registry -> registry.add("gateway.providers.acquirer-sim.base-url", acquirer::baseUrl);
     }
 }

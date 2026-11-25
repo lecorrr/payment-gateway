@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: merchant-sim
+
+server:
+  port: 8092
+
+merchant-sim:
+  # The whsec_ secret the gateway signs the demo merchant's webhooks with.
+  webhook-secret: ${MERCHANT_SIM_WEBHOOK_SECRET:}
+  tolerance: 5m
+  # Above 0, the first deliveries of each webhook are answered 503, to show the gateway's retries.
+  fail-first: ${MERCHANT_SIM_FAIL_FIRST:0}
+  max-events: 100
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

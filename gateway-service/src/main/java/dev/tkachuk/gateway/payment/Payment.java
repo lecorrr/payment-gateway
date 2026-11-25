@@ -8,7 +8,8 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * A row of the payments table. Of the card only the brand, the first six and the last four digits are kept, which
- * PCI DSS allows to be shown; nextCheckAt is set while the payment is PROCESSING.
+ * PCI DSS allows to be shown. actionUrl is set while the payment is REQUIRES_ACTION, nextCheckAt while it is
+ * PROCESSING or REQUIRES_ACTION.
  */
 public record Payment(
         UUID id,
@@ -19,6 +20,7 @@ public record Payment(
         long amount,
         Currency currency,
         @Nullable String description,
+        @Nullable String returnUrl,
         PaymentStatus status,
         CardBrand cardBrand,
         String cardBin,
@@ -26,6 +28,7 @@ public record Payment(
         String provider,
         @Nullable String providerReference,
         @Nullable String declineCode,
+        @Nullable String actionUrl,
         @Nullable Instant nextCheckAt,
         Instant createdAt,
         Instant updatedAt) {

@@ -19,12 +19,31 @@ gateway:
     code: demo-shop
     name: Demo Shop
     api-key: ${GATEWAY_DEMO_MERCHANT_API_KEY:}
+    # Both or neither: where its webhooks go, and their whsec_ signing secret.
+    webhook-url: ${GATEWAY_DEMO_MERCHANT_WEBHOOK_URL:}
+    webhook-secret: ${GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET:}
   payments:
     fingerprint-key: ${GATEWAY_FINGERPRINT_KEY:}
+    # How customers' browsers reach the gateway: they come back here from 3-D Secure challenges.
+    public-url: ${GATEWAY_PUBLIC_URL:http://localhost:8090}
     first-check-after: 30s   # longer than any provider's read timeout below
     check-interval: 10s
+    challenge-check-interval: 1m
     give-up-after: 10m
     check-batch-size: 20
+  webhooks:
+    dispatch-interval: 1s
+    batch-size: 20
+    connect-timeout: 2s
+    read-timeout: 15s
+    # Then given up: seven attempts over about 18 hours.
+    retry-delays:
+      - 5s
+      - 5m
+      - 30m
+      - 2h
+      - 5h
+      - 10h
   providers:
     acquirer-sim:
       base-url: ${ACQUIRER_SIM_URL:http://localhost:8091}

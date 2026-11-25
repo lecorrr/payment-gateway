@@ -15,8 +15,9 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 /**
- * Table payments. Every statement commits on its own; an outcome is only written while the payment is still
- * PROCESSING, so the request and the checker can't overwrite each other, and the first outcome stands.
+ * Table payments. A status change is only written while the payment is still waiting (PROCESSING, or
+ * REQUIRES_ACTION for the change to an outcome), so the request, the checker and the customer's return from a
+ * 3-D Secure challenge can't overwrite each other, and the first outcome stands.
  */
 @Repository
 class PaymentRepository {
@@ -31,11 +32,11 @@ class PaymentRepository {
     boolean insertIfAbsent(Payment payment) {
         int inserted = jdbc.sql("""
                         INSERT INTO payments (id, merchant_id, idempotency_key, request_fingerprint, order_id, amount,
-                            currency, description, status, card_brand, card_bin, card_last4, provider, next_check_at,
-                            created_at, updated_at)
+                            currency, description, return_url, status, card_brand, card_bin, card_last4, provider,
+                            next_check_at, created_at, updated_at)
                         VALUES (:id, :merchantId, :idempotencyKey, :requestFingerprint, :orderId, :amount,
-                            :currency, :description, :status, :cardBrand, :cardBin, :cardLast4, :provider, :nextCheckAt,
-                            :createdAt, :updatedAt)
+                            :currency, :description, :returnUrl, :status, :cardBrand, :cardBin, :cardLast4, :provider,
+                            :nextCheckAt, :createdAt, :updatedAt)
                         ON CONFLICT (merchant_id, idempotency_key) DO NOTHING""")
                 .param("id", payment.id())
                 .param("merchantId", payment.merchantId())
@@ -45,6 +46,7 @@ class PaymentRepository {
                 .param("amount", payment.amount())
                 .param("currency", payment.currency().name())
                 .param("description", payment.description())
+                .param("returnUrl", payment.returnUrl())
                 .param("status", payment.status().name())
                 .param("cardBrand", payment.cardBrand().name())
                 .param("cardBin", payment.cardBin())
@@ -66,6 +68,14 @@ class PaymentRepository {
                 .optional();
     }
 
+    /** Any merchant's payment, for where no merchant is known: the customer's return from 3-D Secure, the checker. */
+    Optional<Payment> findById(UUID id) {
+        return jdbc.sql("SELECT * FROM payments WHERE id = :id")
+                .param("id", id)
+                .query(PaymentRepository::fromRow)
+                .optional();
+    }
+
     Optional<Payment> findByIdempotencyKey(UUID merchantId, String idempotencyKey) {
         return jdbc.sql("SELECT * FROM payments WHERE merchant_id = :merchantId AND idempotency_key = :idempotencyKey")
                 .param("merchantId", merchantId)
@@ -83,8 +93,8 @@ class PaymentRepository {
         return jdbc.sql("""
                         UPDATE payments
                         SET status = :status, provider_reference = :providerReference, decline_code = :declineCode,
-                            next_check_at = NULL, updated_at = :now
-                        WHERE id = :id AND status = 'PROCESSING'
+                            action_url = NULL, next_check_at = NULL, updated_at = :now
+                        WHERE id = :id AND status IN ('PROCESSING', 'REQUIRES_ACTION')
                         RETURNING *""")
                 .param("id", id)
                 .param("status", status.name())
@@ -96,21 +106,46 @@ class PaymentRepository {
     }
 
     /**
-     * Claims PROCESSING payments due for a check by moving their next check to leaseUntil, so a checker running in
-     * another instance skips them. SKIP LOCKED lets instances claim side by side without waiting for each other.
+     * Records that the customer has to pass a 3-D Secure challenge at actionUrl. Empty unless the payment was
+     * PROCESSING: one already waiting for its challenge, or finished, is left as it is.
      */
-    List<Payment> claimDue(Instant now, Instant leaseUntil, int limit) {
+    Optional<Payment> requireAction(UUID id, String providerReference, String actionUrl, Instant nextCheckAt,
+            Instant now) {
         return jdbc.sql("""
-                        UPDATE payments SET next_check_at = :leaseUntil
+                        UPDATE payments
+                        SET status = 'REQUIRES_ACTION', provider_reference = :providerReference,
+                            action_url = :actionUrl, next_check_at = :nextCheckAt, updated_at = :now
+                        WHERE id = :id AND status = 'PROCESSING'
+                        RETURNING *""")
+                .param("id", id)
+                .param("providerReference", providerReference)
+                .param("actionUrl", actionUrl)
+                .param("nextCheckAt", utc(nextCheckAt))
+                .param("now", utc(now))
+                .query(PaymentRepository::fromRow)
+                .optional();
+    }
+
+    /**
+     * Claims the payments due for a check by moving their next check to leaseUntil, or to challengeLeaseUntil for one
+     * waiting for its 3-D Secure challenge, so a checker running in another instance skips them. SKIP LOCKED lets
+     * instances claim side by side without waiting for each other.
+     */
+    List<Payment> claimDue(Instant now, Instant leaseUntil, Instant challengeLeaseUntil, int limit) {
+        return jdbc.sql("""
+                        UPDATE payments
+                        SET next_check_at = CASE WHEN status = 'REQUIRES_ACTION' THEN :challengeLeaseUntil
+                                                 ELSE :leaseUntil END
                         WHERE id IN (
                             SELECT id FROM payments
-                            WHERE status = 'PROCESSING' AND next_check_at <= :now
+                            WHERE next_check_at <= :now
                             ORDER BY next_check_at
                             LIMIT :limit
                             FOR UPDATE SKIP LOCKED)
                         RETURNING *""")
                 .param("now", utc(now))
                 .param("leaseUntil", utc(leaseUntil))
+                .param("challengeLeaseUntil", utc(challengeLeaseUntil))
                 .param("limit", limit)
                 .query(PaymentRepository::fromRow)
                 .list();
@@ -126,6 +161,7 @@ class PaymentRepository {
                 row.getLong("amount"),
                 Currency.valueOf(row.getString("currency")),
                 row.getString("description"),
+                row.getString("return_url"),
                 PaymentStatus.valueOf(row.getString("status")),
                 CardBrand.valueOf(row.getString("card_brand")),
                 row.getString("card_bin"),
@@ -133,6 +169,7 @@ class PaymentRepository {
                 row.getString("provider"),
                 row.getString("provider_reference"),
                 row.getString("decline_code"),
+                row.getString("action_url"),
                 instantOf(row, "next_check_at"),
                 instantOf(row, "created_at"),
                 instantOf(row, "updated_at"));
