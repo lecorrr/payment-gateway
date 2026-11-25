@@ -3,7 +3,10 @@ package dev.tkachuk.gateway.provider;
 /** The gateway's own reasons for a FAILED payment; declines carry the provider's codes instead. */
 public final class FailureCodes {
 
-    /** The provider could not be reached, so it never got the charge. */
+    /**
+     * The provider could not be reached, or turned the charge away unread (429), so it never got it; and no other
+     * provider could take it either.
+     */
     public static final String PROVIDER_UNAVAILABLE = "provider_unavailable";
 
     /** The provider refused the request itself (a 4xx), so it did not charge the card. */

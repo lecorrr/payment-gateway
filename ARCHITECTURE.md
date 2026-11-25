@@ -1,10 +1,13 @@
 # Architecture
 
 Three Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments, and
-charges cards with acquirer-sim or with monobank's acquiring API; **acquirer-sim** plays a card acquirer behind it,
-with its own API, error format and naming (snake_case), the way a real provider would; **merchant-sim** plays a shop
-in front of it, taking the gateway's webhooks and the customer's return from 3-D Secure. The three share no code: merchant-sim checks webhook signatures with its own code, and a
-test in each app checks the same published signature example, so the two sides can't drift apart.
+charges cards with acquirer-sim and with monobank's acquiring API, moving a payment on to the other one when a
+provider can't take it; **acquirer-sim** plays a card acquirer behind it, with its own API, error format and naming
+(snake_case), the way a real provider would, and under `/api/merchant` the part of monobank's API the gateway uses,
+so a second copy of it can play monobank; **merchant-sim** plays a shop in front of it, taking the gateway's
+webhooks and the customer's return from 3-D Secure. The three share no code: merchant-sim checks webhook signatures
+with its own code, and a test in each app checks the same published signature example, so the two sides can't drift
+apart.
 
 ## Modules of gateway-service
 
@@ -14,7 +17,7 @@ test in each app checks the same published signature example, so the two sides c
 | `card`     | card number (Luhn, brand, masking), expiry, CVC; no framework imports                   | common                         |
 | `webhook`  | merchants' webhook endpoints and secrets, the outbox, signing, the dispatcher           | common                         |
 | `merchant` | merchants, the API key filter, the current merchant, the demo merchant                  | common, webhook                |
-| `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ChargeLookup`, `ProviderResult`), the connectors by name, `ChargeNotifications`; one package per provider below it (`acquirersim`, `monobank`) | common, card |
+| `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ChargeLookup`, `ProviderResult`), the connectors by name, the routing between them (`ProviderRouter`), `ChargeNotifications`; one package per provider below it (`acquirersim`, `monobank`) | common, card |
 | `payment`  | the API controller, `PaymentService`, the payments table, fingerprints, the checker, the 3-D Secure return | common, card, merchant, provider, webhook, api |
 
 `api` is the interface and DTOs generated from
@@ -36,8 +39,8 @@ else. `webhook` knows nothing of payments: it stores and sends whatever JSON bod
    422 `CARD_EXPIRED`. Requests refused here store nothing, so the key can be used again.
 4. The payment is inserted as `PROCESSING` with its first check due (`INSERT ... ON CONFLICT DO NOTHING`; losing a
    race with a parallel request turns into a replay of the winner's payment).
-5. The active provider (`gateway.providers.active`) is called outside any transaction, with the payment's id as
-   the reference and the gateway's `/3ds/return/{id}` as the return URL; the payment keeps the provider's name. What
+5. The provider the router picks (see Routing) is called outside any transaction, with the payment's id as the
+   reference and the gateway's `/3ds/return/{id}` as the return URL; the payment keeps the provider's name. What
    came back decides the status:
 
    | What happened                                          | Outcome          | Payment                                  |
@@ -46,9 +49,12 @@ else. `webhook` knows nothing of payments: it stores and sends whatever JSON bod
    | declined                                               | DECLINED         | `DECLINED` with the provider's code      |
    | requires_action with a challenge URL                   | REQUIRES_ACTION  | `REQUIRES_ACTION` with `nextAction`      |
    | still processing                                       | PENDING          | stays as it is; the provider's id is kept |
-   | 4xx: the request itself was refused                    | FAILED           | `FAILED`, `provider_rejected_request`    |
-   | connection refused, unknown host, connect timeout      | FAILED           | `FAILED`, `provider_unavailable`         |
+   | other 4xx: the request itself was refused              | FAILED           | `FAILED`, `provider_rejected_request`    |
+   | connection refused, unknown host, connect timeout, 429 | FAILED           | `FAILED`, `provider_unavailable`         |
    | 5xx, read timeout, dropped connection, unreadable body | UNKNOWN          | stays `PROCESSING`                       |
+
+   `provider_unavailable` means the provider never got the charge, so the payment first goes to the next provider,
+   and fails only when none is left.
 
 6. The change is written with `UPDATE ... WHERE status IN ('PROCESSING', 'REQUIRES_ACTION')` (only `PROCESSING` for
    the move to `REQUIRES_ACTION`), in one transaction with its webhook event. Whichever of the request, the checker,
@@ -64,6 +70,31 @@ lookup changes nothing, since it says nothing about the charge, and the payment 
 
 Only states that can't be wrong are written: a payment is never marked `FAILED` while the card may have been
 charged, and a challenge is never given up by the gateway while the bank may still approve it.
+
+## Routing
+
+`gateway.providers.order` (`GATEWAY_PROVIDERS`) lists the providers new payments go to, the preferred one first;
+each of them must have its settings, by a startup check. For a new payment, `ProviderRouter` gives the first
+provider in that order whose circuit lets a charge through, and the payment is stored with it. When that provider
+never got the charge (`FAILED`, `provider_unavailable`: no connection, or 429), the router gives the next one, and
+the payment is moved to it in the database before it is charged there (`UPDATE ... WHERE status = 'PROCESSING' AND
+provider_reference IS NULL`), so the payment always names the provider that may have its charge. Every other outcome
+stays with the provider that had the charge, a timeout or a 5xx included: the card may have been charged there, and
+charging it elsewhere too could charge it twice. With no provider left the payment is `FAILED`,
+`provider_unavailable`; when every circuit is open, at once, without a call.
+
+Each provider has a circuit breaker (Resilience4j), counting its last `window-size` charges. A charge counts as
+failed when it got no answer (UNKNOWN) or never got through; declines and refused requests are the provider doing
+its job. Once at least `minimum-calls` are counted and `failure-rate-percent` of them failed, the circuit opens: the
+provider gets no new payments for `open-for`, then `trial-calls` charges decide whether it closes or stays open for
+another `open-for`. Lookups don't go through the circuit, so payments a provider already has are settled with it as
+before.
+
+Instances share open circuits through Redis. When a circuit opens, the provider is marked under
+`payment-gateway:open-circuit:<name>` for `open-for`, and other instances skip it without failing payments of their
+own against it first; the mark goes when the circuit closes. Redis is optional: when it can't be reached, each
+instance goes by its own circuits, says so once in its log, and asks Redis again after 30 s, so Redis being down
+costs payments at most its 500 ms timeout once every 30 s, and never fails one.
 
 ## 3-D Secure
 
@@ -140,17 +171,20 @@ order can't set a payment back.
 ## Adding a provider
 
 1. A new package under `provider`, with a `ProviderConnector` and its properties record. Its `name()` is stored with
-   each payment it charges; `missingSettings()` names what it still needs, and the active provider must need nothing.
-2. Map the provider's answers to `ProviderResult`. `FAILED` only when the card was certainly not charged; anything
-   in doubt is `UNKNOWN`, and the checker settles it with `lookup`; a charge the provider is still working on is
-   `PENDING`. A 3-D Secure challenge is `REQUIRES_ACTION` with the URL to send the customer to; the provider must send
-   the browser back to the `returnUrl` of the `ChargeRequest`. Decline codes are the gateway's, as in the API contract.
+   each payment it charges; `missingSettings()` names what it still needs, and a provider in
+   `gateway.providers.order` must need nothing.
+2. Map the provider's answers to `ProviderResult`. `FAILED` only when the card was certainly not charged, and
+   `provider_unavailable` only when the provider never got the request, since that sends the payment to the next
+   provider; anything in doubt is `UNKNOWN`, and the checker settles it with `lookup`; a charge the provider is still
+   working on is `PENDING`. A 3-D Secure challenge is `REQUIRES_ACTION` with the URL to send the customer to; the
+   provider must send the browser back to the `returnUrl` of the `ChargeRequest`. Decline codes are the gateway's, as
+   in the API contract.
 3. A lookup gets the payment's id, the provider's own id when the gateway has one, and when the charge was sent.
 4. A provider's webhook, if it has them, checks the provider's signature and calls `ChargeNotifications`.
 5. Test the failure modes with WireMock, as `AcquirerSimConnectorTest` and `MonobankConnectorTest` do.
 
-`ProviderConnectors` holds every connector by name and the active one; a payment is always looked up with the
-provider that charged it, so switching providers leaves payments in flight with their own.
+`ProviderConnectors` holds every connector by name, and those of `gateway.providers.order` in that order; a payment is
+always looked up with the provider that charged it, so changing the order leaves payments in flight with their own.
 
 ## Decisions
 
@@ -159,6 +193,15 @@ provider that charged it, so switching providers leaves payments in flight with 
 - **The payment is stored before the provider call.** An HTTP call can't be part of a database transaction; storing
   `PROCESSING` first means a crash mid-call leaves a payment for the checker, never a charge the gateway doesn't know
   about.
+- **Failover only when a provider never got the charge.** After a timeout or a 5xx the card may have been charged,
+  and trying the next provider could charge it twice; the checker finds out instead. The move to the next provider
+  is written before the call, so the payment never has a charge at a provider it doesn't name.
+- **Resilience4j's circuit breaker, without its Spring Boot starter.** The router asks each circuit for a permit and
+  reports every charge's result itself: what counts as a failure is in the provider's answer, not an exception, and
+  a circuit that is open sends the payment to the next provider rather than failing it.
+- **Open circuits shared through Redis, but each instance decides alone.** Sharing spares the other instances from
+  failing payments' first tries against a provider known to be down; keeping the circuits themselves in each
+  instance means that Redis going away loses only that.
 - **An outbox, not a webhook call in the request.** Sending from the request would either hold a transaction open
   over an HTTP call or lose the event on a crash between commit and send.
 - **Standard Webhooks** for signing, rather than a scheme of the gateway's own: merchants can check signatures
@@ -183,7 +226,9 @@ provider that charged it, so switching providers leaves payments in flight with 
 | `GATEWAY_DEMO_MERCHANT_API_KEY`                 | empty: no demo merchant | the demo merchant's API key, 24+ characters                |
 | `GATEWAY_DEMO_MERCHANT_WEBHOOK_URL`, `_SECRET`  | empty: no webhooks      | the demo merchant's webhook endpoint and `whsec_` secret   |
 | `ACQUIRER_SIM_URL`, `ACQUIRER_SIM_API_KEY`      | localhost:8091, none    | where acquirer-sim is, and its key                         |
-| `GATEWAY_PROVIDER`                              | acquirer-sim            | the provider new payments are charged with                 |
+| `GATEWAY_PROVIDERS`                             | acquirer-sim            | the providers new payments go to, the preferred one first  |
+| `REDIS_HOST`, `REDIS_PORT`                      | localhost, 6379         | Redis, to share open circuits between instances; optional  |
+| `gateway.providers.circuit-breaker.open-for`    | 30s                     | how long a failing provider is skipped; Routing has the rest |
 | `GATEWAY_MONOBANK_TOKEN`                        | empty: not configured   | the merchant's monobank token (X-Token); a test token works |
 | `GATEWAY_MONOBANK_WEBHOOK_URL`                  | empty: no webhooks      | this gateway's `/providers/monobank/webhooks`, as monobank reaches it |
 | `MONOBANK_URL`                                  | https://api.monobank.ua | where monobank's API is                                    |

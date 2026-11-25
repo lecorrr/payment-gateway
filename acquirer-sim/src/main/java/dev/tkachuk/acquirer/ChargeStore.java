@@ -1,8 +1,10 @@
 package dev.tkachuk.acquirer;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.UnaryOperator;
@@ -59,6 +61,18 @@ class ChargeStore {
 
     synchronized Optional<StoredCharge> findById(String chargeId) {
         return Optional.ofNullable(referenceById.get(chargeId)).map(byReference::get);
+    }
+
+    /** The charges made at from or later, the newest first. */
+    synchronized List<StoredCharge> createdSince(Instant from) {
+        List<StoredCharge> found = new ArrayList<>();
+        for (StoredCharge stored : byReference.values()) {
+            if (!stored.charge().createdAt().isBefore(from)) {
+                found.add(stored);
+            }
+        }
+        // Kept in the order they were made.
+        return found.reversed();
     }
 
     /**

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: acquirer-sim
-  version: 0.2.0
+  version: 0.4.0
   description: >-
     A simulated card acquirer for running payment-gateway without a real one. Charges are kept in memory and decided
     by the card number:
@@ -24,6 +24,15 @@ info:
     instead of a real bank's check. Passing it approves the charge, failing it declines it with
     authentication_failed, and leaving it open past sim.challenge-ttl declines it with authentication_expired. Either
     way the browser then goes to the charge's `return_url`; the caller finds the outcome with a lookup.
+
+
+    **monobank's API.** Under `/api/merchant`, acquirer-sim also answers the part of monobank's acquiring API that
+    payment-gateway's monobank connector uses, so a second copy of it can stand in for monobank. Those requests need
+    the API key in `X-Token`. The same cards decide; a charge's id is its invoice id, and a declined charge is a
+    "failure" with the errCode monobank uses for it: 6 for do_not_honor, 59 insufficient_funds, 80 incorrect_cvc, 51
+    expired_card, 1000 processing_error, 1054 authentication_failed. A challenge left open is "expired". When
+    payment-direct gives a `webHookUrl`, the decided invoice is POSTed there, signed in `X-Sign` with the key from
+    `/api/merchant/pubkey` (ECDSA, P-256, SHA-256), up to three times. Errors are in acquirer-sim's own format.
 servers:
   - url: /
     description: The server this page comes from
@@ -150,11 +159,117 @@ paths:
               schema:
                 type: string
 
+  /api/merchant/invoice/payment-direct:
+    post:
+      operationId: monobankPaymentDirect
+      summary: Charge a card, as monobank's payment-direct
+      description: >-
+        One charge per reference, as with /v1/charges. A failure comes with failureReason but no errCode, as from
+        monobank; the invoice status has the errCode. A challenge comes as "processing" with tdsUrl.
+      security:
+        - XToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MonobankPaymentDirect'
+      responses:
+        '200':
+          description: The invoice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MonobankInvoice'
+        '400':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+
+  /api/merchant/invoice/status:
+    get:
+      operationId: monobankInvoiceStatus
+      summary: The invoice as it is now
+      security:
+        - XToken: []
+      parameters:
+        - name: invoiceId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The invoice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MonobankInvoice'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /api/merchant/statement:
+    get:
+      operationId: monobankStatement
+      summary: The invoices made in a period, the newest first
+      security:
+        - XToken: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Unix time in seconds
+          schema:
+            type: integer
+            format: int64
+        - name: to
+          in: query
+          required: false
+          description: Unix time in seconds; now if left out
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: The invoices
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MonobankStatement'
+        '403':
+          $ref: '#/components/responses/Error'
+
+  /api/merchant/pubkey:
+    get:
+      operationId: monobankPublicKey
+      summary: The key webhooks are signed with
+      security:
+        - XToken: []
+      responses:
+        '200':
+          description: Base64 of a PEM block; a new key at every start
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key]
+                properties:
+                  key:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Error'
+
 components:
   securitySchemes:
     Bearer:
       type: http
       scheme: bearer
+    XToken:
+      type: apiKey
+      in: header
+      name: X-Token
 
   responses:
     Error:
@@ -245,6 +360,110 @@ components:
         created_at:
           type: string
           format: date-time
+
+    MonobankPaymentDirect:
+      type: object
+      required: [amount, ccy, cardData, merchantPaymInfo, redirectUrl]
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: In minor units
+        ccy:
+          type: integer
+          enum: [980, 840, 978]
+          description: ISO 4217 number of UAH, USD or EUR
+        cardData:
+          type: object
+          required: [pan, exp, cvv]
+          properties:
+            pan:
+              type: string
+              pattern: '^[0-9]{12,19}$'
+            exp:
+              type: string
+              pattern: '^(0[1-9]|1[0-2])[0-9]{2}$'
+              description: mmyy
+            cvv:
+              type: string
+              pattern: '^[0-9]{3,4}$'
+        merchantPaymInfo:
+          type: object
+          required: [reference]
+          properties:
+            reference:
+              type: string
+              maxLength: 64
+            destination:
+              type: string
+              maxLength: 280
+        redirectUrl:
+          type: string
+          description: Where the browser goes after a challenge
+        webHookUrl:
+          type: string
+          description: Where the decided invoice is sent
+        paymentType:
+          type: string
+          enum: [debit]
+        initiationKind:
+          type: string
+          enum: [client, merchant]
+
+    MonobankInvoice:
+      type: object
+      required: [invoiceId, status, amount, ccy, finalAmount, createdDate, reference]
+      properties:
+        invoiceId:
+          type: string
+        status:
+          type: string
+          enum: [success, failure, processing, expired]
+        errCode:
+          type: string
+        failureReason:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        ccy:
+          type: integer
+        finalAmount:
+          type: integer
+          format: int64
+        createdDate:
+          type: string
+          format: date-time
+        reference:
+          type: string
+        tdsUrl:
+          type: string
+          description: From payment-direct only, for a challenge
+
+    MonobankStatement:
+      type: object
+      required: [list]
+      properties:
+        list:
+          type: array
+          items:
+            type: object
+            properties:
+              invoiceId:
+                type: string
+              status:
+                type: string
+              amount:
+                type: integer
+                format: int64
+              ccy:
+                type: integer
+              date:
+                type: string
+                format: date-time
+              reference:
+                type: string
 
     Error:
       type: object

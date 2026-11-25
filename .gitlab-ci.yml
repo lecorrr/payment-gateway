@@ -31,12 +31,12 @@ variables:
     - name: docker:29-dind
       alias: docker
       # Docker Hub limits anonymous pulls per IP address, and GitLab's runners share theirs with other projects.
-      # Google's copy of Docker Hub serves postgres and the Java base image instead; Docker Hub itself still serves
-      # anything the copy lacks.
+      # Google's copy of Docker Hub serves postgres, redis and the Java base image instead; Docker Hub itself still
+      # serves anything the copy lacks.
       command: ["--tls=false", "--registry-mirror=https://mirror.gcr.io"]
 
-# Unit tests, integration tests against PostgreSQL in Testcontainers, and the coverage gate (80 % of lines per
-# module): any of them failing fails the pipeline.
+# Unit tests, integration tests against PostgreSQL and Redis in Testcontainers, and the coverage gate (80 % of lines
+# per module): any of them failing fails the pipeline.
 verify:
   stage: test
   extends: .docker-in-docker

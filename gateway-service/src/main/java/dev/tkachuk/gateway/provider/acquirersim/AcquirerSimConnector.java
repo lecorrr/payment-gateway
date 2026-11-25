@@ -24,11 +24,12 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 /**
- * acquirer-sim, the simulated card acquirer in this repository, over its REST API. What matters most is telling
- * "not charged" from "don't know": a 4xx or a connection that never opened is FAILED, while a 5xx, a read timeout or
- * an unreadable answer is UNKNOWN, and the payment waits for a lookup. "requires_action" is a 3-D Secure challenge,
- * passed on with the challenge's URL. Charges are looked up by the payment's id, which acquirer-sim keeps as their
- * reference.
+ * acquirer-sim, the simulated card acquirer in this repository, over its REST API. What matters most is telling "not
+ * charged" from "don't know": a 4xx or a connection that never opened is FAILED, while a 5xx, a read timeout or an
+ * unreadable answer is UNKNOWN, and the payment waits for a lookup. A connection that never opened and a 429 are the
+ * provider being unavailable, which lets another provider take the charge. "requires_action" is a 3-D Secure
+ * challenge, passed on with the challenge's URL. Charges are looked up by the payment's id, which acquirer-sim keeps
+ * as their reference.
  */
 @Component
 class AcquirerSimConnector implements ProviderConnector {
@@ -63,6 +64,9 @@ class AcquirerSimConnector implements ProviderConnector {
                     .retrieve()
                     .body(SimCharge.class);
             return resultOf(charge, reference);
+        } catch (HttpClientErrorException.TooManyRequests e) {
+            log.warn("acquirer-sim turned the charge for payment {} away: HTTP 429, too many requests", reference);
+            return ProviderResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
         } catch (HttpClientErrorException e) {
             log.warn("acquirer-sim refused the charge for payment {}: HTTP {}", reference, e.getStatusCode().value());
             return ProviderResult.failed(FailureCodes.PROVIDER_REJECTED_REQUEST);

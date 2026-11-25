@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 (2026-11-26)
+
+- Failover: `GATEWAY_PROVIDERS` lists the providers new payments go to, the preferred one first, and replaces
+  `GATEWAY_PROVIDER`. A payment goes on to the next provider only when one never got the charge (no connection, or
+  429), so no card is charged twice; with none left it fails as `provider_unavailable`.
+- A circuit breaker per provider (Resilience4j): a provider whose charges keep getting no answer or not getting
+  through is skipped for 30 s, then two trial charges show whether it is back. A payment that finds every provider
+  skipped fails at once instead of waiting on them.
+- Gateway instances share open circuits through Redis. Redis is optional: without it each instance goes by its own,
+  and a payment never waits on it for more than 500 ms.
+- The acquirer-sim connector takes a 429 as a charge turned away unread, as the monobank one already did.
+- acquirer-sim also answers the part of monobank's acquiring API the gateway uses, under `/api/merchant`, with
+  webhooks signed as monobank signs them.
+- compose runs Redis and monobank-sim, a second acquirer-sim playing monobank; new payments go to it first, and to
+  acquirer-sim when it is stopped. A new host port setting, `MONOBANK_SIM_PORT` (8093).
+
 ## 0.3.1 (2026-11-25)
 
 - The pipeline runs on GitLab's own runners, picked by their tag, instead of a runner on the developer's machine:

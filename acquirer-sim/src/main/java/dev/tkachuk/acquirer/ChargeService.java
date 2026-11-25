@@ -10,13 +10,20 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
+/**
+ * The charges: decided by Issuer, kept in ChargeStore. A charge whose status changes after its first answer, when its
+ * 3-D Secure challenge ends or runs out, is published as ChargeChanged.
+ */
 @Service
 class ChargeService {
 
@@ -32,11 +39,13 @@ class ChargeService {
     private final ChargeStore store;
     private final SimProperties properties;
     private final Clock clock;
+    private final ApplicationEventPublisher events;
 
-    ChargeService(ChargeStore store, SimProperties properties, Clock clock) {
+    ChargeService(ChargeStore store, SimProperties properties, Clock clock, ApplicationEventPublisher events) {
         this.store = store;
         this.properties = properties;
         this.clock = clock;
+        this.events = events;
     }
 
     /**
@@ -88,6 +97,11 @@ class ChargeService {
         return store.findById(chargeId).map(this::current);
     }
 
+    /** The charges made at from or later, as they are now, the newest first. */
+    List<Charge> chargesSince(Instant from) {
+        return store.createdSince(from).stream().map(this::current).map(StoredCharge::charge).toList();
+    }
+
     /**
      * The cardholder passed or failed the challenge. A charge that is no longer waiting stays as it is, so the
      * first outcome stands; empty if no charge has this id.
@@ -97,9 +111,10 @@ class ChargeService {
         if (found.isEmpty()) {
             return Optional.empty();
         }
-        return store.update(found.get().charge().reference(), stored -> {
+        AtomicReference<Charge> changed = new AtomicReference<>();
+        Optional<StoredCharge> result = store.update(found.get().charge().reference(), stored -> {
             if (isExpired(stored)) {
-                return expire(stored);
+                return expire(stored, changed);
             }
             if (!stored.charge().waitsForChallenge()) {
                 return stored;
@@ -108,25 +123,38 @@ class ChargeService {
                     ? stored.charge().approved(newAuthCode())
                     : stored.charge().declined(Issuer.AUTHENTICATION_FAILED);
             log.info("Charge {}: challenge {}, {}", charge.id(), passed ? "passed" : "failed", charge.status());
+            changed.set(charge);
             return stored.with(charge);
         });
+        publish(changed);
+        return result;
     }
 
     private StoredCharge current(StoredCharge stored) {
         if (!isExpired(stored)) {
             return stored;
         }
-        return store.update(stored.charge().reference(), this::expireIfStillDue).orElse(stored);
+        AtomicReference<Charge> changed = new AtomicReference<>();
+        // Under the store's lock, where the charge may have been finished since it was read.
+        StoredCharge now = store.update(stored.charge().reference(),
+                latest -> isExpired(latest) ? expire(latest, changed) : latest).orElse(stored);
+        publish(changed);
+        return now;
     }
 
-    // Runs under the store's lock, where the charge may have been finished since it was read.
-    private StoredCharge expireIfStillDue(StoredCharge stored) {
-        return isExpired(stored) ? expire(stored) : stored;
+    // After the store's lock is let go: listeners don't hold up other requests.
+    private void publish(AtomicReference<Charge> changed) {
+        Charge charge = changed.get();
+        if (charge != null) {
+            events.publishEvent(new ChargeChanged(charge));
+        }
     }
 
-    private StoredCharge expire(StoredCharge stored) {
+    private StoredCharge expire(StoredCharge stored, AtomicReference<Charge> changed) {
         log.info("Charge {}: challenge left open past {}, declined", stored.charge().id(), properties.challengeTtl());
-        return stored.with(stored.charge().declined(Issuer.AUTHENTICATION_EXPIRED));
+        Charge charge = stored.charge().declined(Issuer.AUTHENTICATION_EXPIRED);
+        changed.set(charge);
+        return stored.with(charge);
     }
 
     private boolean isExpired(StoredCharge stored) {

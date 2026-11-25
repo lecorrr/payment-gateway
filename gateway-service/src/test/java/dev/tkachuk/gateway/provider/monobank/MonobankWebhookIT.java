@@ -21,7 +21,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 
 /**
  * monobank's webhooks: signed with its key, and only a reason to look the payment up again. The payments are
- * written straight into the table, as the active provider here is acquirer-sim; their next check is an hour away,
+ * written straight into the table, as new payments here go to acquirer-sim first; their next check is an hour away,
  * so whatever changes is the webhook's doing.
  */
 class MonobankWebhookIT extends IntegrationTest {

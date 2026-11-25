@@ -49,9 +49,25 @@ class ChargeStoreTest {
         assertThat(store.update("ref-unknown", stored -> stored)).isEmpty();
     }
 
+    @Test
+    void shouldListChargesMadeSinceTimeNewestFirst() {
+        store.putIfAbsent(stored("ref-1", "ch_1", Instant.parse("2026-11-25T09:59:59Z")));
+        store.putIfAbsent(stored("ref-2", "ch_2", Instant.parse("2026-11-25T10:00:00Z")));
+
+        assertThat(store.createdSince(Instant.parse("2026-11-25T10:00:00Z")))
+                .extracting(stored -> stored.charge().reference())
+                .containsExactly("ref-2");
+        assertThat(store.createdSince(Instant.parse("2026-11-25T09:00:00Z")))
+                .extracting(stored -> stored.charge().reference())
+                .containsExactly("ref-2", "ref-1");
+    }
+
     private static StoredCharge stored(String reference, String id) {
-        Charge charge = new Charge(id, reference, Charge.APPROVED, null, "123456", null, 15000, "UAH",
-                Instant.parse("2026-11-25T10:00:00Z"));
+        return stored(reference, id, Instant.parse("2026-11-25T10:00:00Z"));
+    }
+
+    private static StoredCharge stored(String reference, String id, Instant createdAt) {
+        Charge charge = new Charge(id, reference, Charge.APPROVED, null, "123456", null, 15000, "UAH", createdAt);
         return new StoredCharge(charge, "hash-of-" + reference, null, null);
     }
 }

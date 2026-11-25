@@ -1,7 +1,7 @@
-# The gateway, the simulated acquirer, a simulated shop and PostgreSQL for a local demo. Ports are published on
-# localhost only. Build the jars first (./mvnw package) and make the .env file as the README shows: without it
+# The gateway, two simulated providers, a simulated shop, PostgreSQL and Redis for a local demo. Ports are published
+# on localhost only. Build the jars first (./mvnw package) and make the .env file as the README shows: without it
 # compose won't start. A host port that is taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT,
-# MERCHANT_SIM_PORT, GATEWAY_DB_PORT.
+# MONOBANK_SIM_PORT, MERCHANT_SIM_PORT, GATEWAY_DB_PORT.
 name: payment-gateway
 
 services:
@@ -23,6 +23,10 @@ services:
       timeout: 3s
       retries: 12
 
+  # Shares open circuits between gateway instances. Only the gateway uses it, so no port is published.
+  redis:
+    image: redis:8-alpine   # the same tag as redis.image in pom.xml
+
   acquirer-sim:
     build: ./acquirer-sim
     image: acquirer-sim:local
@@ -32,6 +36,17 @@ services:
       SIM_PUBLIC_URL: http://localhost:${ACQUIRER_SIM_PORT:-8091}
     ports:
       - "127.0.0.1:${ACQUIRER_SIM_PORT:-8091}:8091"
+
+  # A second acquirer-sim, playing monobank: the gateway's monobank connector talks to the monobank-style API it
+  # has under /api/merchant. Stopping it shows new payments moving to acquirer-sim.
+  monobank-sim:
+    build: ./acquirer-sim
+    image: monobank-sim:local
+    environment:
+      ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
+      SIM_PUBLIC_URL: http://localhost:${MONOBANK_SIM_PORT:-8093}
+    ports:
+      - "127.0.0.1:${MONOBANK_SIM_PORT:-8093}:8091"
 
   merchant-sim:
     build: ./merchant-sim
@@ -48,12 +63,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
       acquirer-sim:
+        condition: service_started
+      monobank-sim:
         condition: service_started
       merchant-sim:
         condition: service_started
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/gateway
+      REDIS_HOST: redis
       ACQUIRER_SIM_URL: http://acquirer-sim:8091
       ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
       GATEWAY_FINGERPRINT_KEY: ${GATEWAY_FINGERPRINT_KEY:?make the .env file first, see the README}
@@ -62,11 +82,14 @@ services:
       GATEWAY_DEMO_MERCHANT_WEBHOOK_URL: http://merchant-sim:8092/webhooks
       GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET: ${GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET:?make the .env file first, see the README}
       GATEWAY_PUBLIC_URL: http://localhost:${GATEWAY_PORT:-8090}
-      # acquirer-sim unless .env says monobank, which then needs a token. monobank can't reach this machine, so
-      # its webhooks stay off unless GATEWAY_MONOBANK_WEBHOOK_URL is a public address of this gateway.
-      GATEWAY_PROVIDER: ${GATEWAY_PROVIDER:-acquirer-sim}
-      GATEWAY_MONOBANK_TOKEN: ${GATEWAY_MONOBANK_TOKEN:-}
-      GATEWAY_MONOBANK_WEBHOOK_URL: ${GATEWAY_MONOBANK_WEBHOOK_URL:-}
+      # New payments go to monobank first, and to acquirer-sim when monobank can't take them.
+      GATEWAY_PROVIDERS: ${GATEWAY_PROVIDERS:-monobank,acquirer-sim}
+      # monobank is monobank-sim, with acquirer-sim's key as the token, unless .env names the real one and a token
+      # (see .env.example). monobank-sim sends its webhooks here; the real monobank needs a public address of this
+      # gateway in GATEWAY_MONOBANK_WEBHOOK_URL, or the setting left empty for none, which the single "-" allows.
+      MONOBANK_URL: ${MONOBANK_URL:-http://monobank-sim:8091}
+      GATEWAY_MONOBANK_TOKEN: ${GATEWAY_MONOBANK_TOKEN:-${ACQUIRER_SIM_API_KEY}}
+      GATEWAY_MONOBANK_WEBHOOK_URL: ${GATEWAY_MONOBANK_WEBHOOK_URL-http://gateway:8090/providers/monobank/webhooks}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8090}:8090"
 

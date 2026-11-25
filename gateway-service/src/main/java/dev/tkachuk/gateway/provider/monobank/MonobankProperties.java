@@ -5,8 +5,8 @@ import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * gateway.providers.monobank. Without a token monobank is not configured, which is fine unless it is the active
- * provider. The webhook URL is where monobank should report invoice changes: this gateway's
+ * gateway.providers.monobank. Without a token monobank is not configured, which is fine unless gateway.providers.order
+ * names it. The webhook URL is where monobank should report invoice changes: this gateway's
  * /providers/monobank/webhooks as monobank can reach it, or empty for none. The read timeout must be the longer one:
  * after a connect timeout the request never left, so the card was not charged; after a read timeout it may have been.
  */

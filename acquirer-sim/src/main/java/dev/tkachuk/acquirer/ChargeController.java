@@ -1,8 +1,6 @@
 package dev.tkachuk.acquirer;
 
 import jakarta.validation.Valid;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.Optional;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -25,7 +23,7 @@ class ChargeController {
 
     @PostMapping
     ResponseEntity<?> create(@Valid @RequestBody ChargeRequest request) {
-        if (request.returnUrl() != null && !isUrlWithHost(request.returnUrl())) {
+        if (request.returnUrl() != null && !Urls.hasHost(request.returnUrl())) {
             return ResponseEntity.badRequest()
                     .body(new SimError("invalid_request", "return_url must be an http(s) URL with a host"));
         }
@@ -46,14 +44,5 @@ class ChargeController {
                     .body(new SimError("not_found", "No charge has this reference"));
         }
         return ResponseEntity.ok(charge.get());
-    }
-
-    // The pattern on return_url only checks the scheme and that there are no spaces.
-    private static boolean isUrlWithHost(String url) {
-        try {
-            return new URI(url).getHost() != null;
-        } catch (URISyntaxException e) {
-            return false;
-        }
     }
 }

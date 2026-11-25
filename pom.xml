@@ -13,7 +13,7 @@
 
     <groupId>dev.tkachuk</groupId>
     <artifactId>payment-gateway</artifactId>
-    <version>0.3.1</version>
+    <version>0.4.0</version>
     <packaging>pom</packaging>
     <name>payment-gateway</name>
     <description>Card payments for merchants through pluggable payment providers</description>
@@ -28,11 +28,14 @@
         <java.version>21</java.version>
         <springdoc.version>3.1.0</springdoc.version>
         <openapi-generator.version>7.22.0</openapi-generator.version>
+        <!-- Only the circuit breaker itself: the gateway builds its circuits from its own settings. -->
+        <resilience4j.version>2.4.0</resilience4j.version>
         <!-- Standalone jar: it shades its own Jetty and Jackson. -->
         <wiremock.version>3.13.2</wiremock.version>
         <jacoco.version>0.8.13</jacoco.version>
-        <!-- Testcontainers image; compose.yaml uses the same tag. -->
+        <!-- Testcontainers images; compose.yaml uses the same tags. -->
         <postgres.image>postgres:17-alpine</postgres.image>
+        <redis.image>redis:8-alpine</redis.image>
         <!-- Line coverage per module, unit and integration tests together. -->
         <coverage.minimum>0.80</coverage.minimum>
         <!-- Load Mockito as an agent at startup; newer JDKs warn about attaching it later. -->
@@ -51,6 +54,11 @@
                 <artifactId>wiremock-standalone</artifactId>
                 <version>${wiremock.version}</version>
             </dependency>
+            <dependency>
+                <groupId>io.github.resilience4j</groupId>
+                <artifactId>resilience4j-circuitbreaker</artifactId>
+                <version>${resilience4j.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -64,6 +72,7 @@
                     <configuration>
                         <systemPropertyVariables>
                             <postgres.image>${postgres.image}</postgres.image>
+                            <redis.image>${redis.image}</redis.image>
                         </systemPropertyVariables>
                     </configuration>
                 </plugin>
@@ -73,6 +82,7 @@
                     <configuration>
                         <systemPropertyVariables>
                             <postgres.image>${postgres.image}</postgres.image>
+                            <redis.image>${redis.image}</redis.image>
                         </systemPropertyVariables>
                     </configuration>
                 </plugin>

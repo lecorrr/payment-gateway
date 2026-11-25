@@ -101,6 +101,15 @@ class AcquirerSimConnectorTest {
                 .isEqualTo(ProviderResult.failed(FailureCodes.PROVIDER_REJECTED_REQUEST));
     }
 
+    // Turned away unread: another provider may take the charge.
+    @Test
+    void shouldFailChargeTurnedAwayForTooManyRequests() {
+        acquirer.stubFor(post("/v1/charges").willReturn(aResponse().withStatus(429)));
+
+        assertThat(connector.charge(chargeRequest()))
+                .isEqualTo(ProviderResult.failed(FailureCodes.PROVIDER_UNAVAILABLE));
+    }
+
     @Test
     void shouldFailChargeWhenAcquirerIsUnreachable() throws IOException {
         int closedPort;

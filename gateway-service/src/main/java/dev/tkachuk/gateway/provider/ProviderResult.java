@@ -61,4 +61,17 @@ public record ProviderResult(Outcome outcome, @Nullable String providerReference
     public static ProviderResult unknown() {
         return new ProviderResult(Outcome.UNKNOWN, null, null, null);
     }
+
+    /** The provider couldn't take the charge: it was unreachable or turned it away unread, so it never got it. */
+    public boolean isUnavailable() {
+        return outcome == Outcome.FAILED && FailureCodes.PROVIDER_UNAVAILABLE.equals(code);
+    }
+
+    /**
+     * Whether this tells something about the provider rather than about the charge: no way through, or no answer.
+     * A decline or a refused request is the provider working as it should.
+     */
+    public boolean isProviderFailure() {
+        return outcome == Outcome.UNKNOWN || isUnavailable();
+    }
 }

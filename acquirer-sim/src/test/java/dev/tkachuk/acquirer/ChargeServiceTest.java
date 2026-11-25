@@ -6,9 +6,11 @@ import dev.tkachuk.acquirer.ChargeService.Kind;
 import dev.tkachuk.acquirer.ChargeStore.StoredCharge;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
-/** The 3-D Secure challenge of a charge, with a clock the test moves. */
+/** The 3-D Secure challenge of a charge, with a clock the test moves, and the changes it publishes. */
 class ChargeServiceTest {
 
     private static final Duration TTL = Duration.ofMinutes(15);
@@ -17,7 +19,9 @@ class ChargeServiceTest {
     private final TestClock clock = new TestClock(Instant.parse("2026-11-25T10:00:00Z"));
     private final SimProperties properties = new SimProperties("test-acquirer-key-0123456789",
             "http://sim.test", Duration.ZERO, TTL, 100);
-    private final ChargeService charges = new ChargeService(new ChargeStore(properties), properties, clock);
+    private final List<Object> events = new ArrayList<>();
+    private final ChargeService charges = new ChargeService(new ChargeStore(properties), properties, clock,
+            events::add);
 
     @Test
     void shouldWaitForChallengeAtItsPage() {
@@ -105,6 +109,57 @@ class ChargeServiceTest {
         assertThat(charge.status()).isEqualTo(Charge.DECLINED);
         assertThat(charge.declineCode()).isEqualTo("incorrect_cvc");
         assertThat(charge.actionUrl()).isNull();
+    }
+
+    @Test
+    void shouldPublishOutcomeOfChallenge() {
+        Charge charge = challengeCharge("ref-1").charge();
+
+        Charge completed = charges.completeChallenge(charge.id(), true).orElseThrow().charge();
+
+        assertThat(events).containsExactly(new ChargeChanged(completed));
+    }
+
+    @Test
+    void shouldPublishChallengeThatRanOutOnce() {
+        challengeCharge("ref-1");
+        clock.advance(TTL);
+
+        Charge expired = charges.find("ref-1").orElseThrow();
+        charges.find("ref-1");
+        charges.completeChallenge(expired.id(), true);
+
+        assertThat(events).containsExactly(new ChargeChanged(expired));
+    }
+
+    @Test
+    void shouldPublishNothingWhenChallengeIsOverAlready() {
+        Charge charge = challengeCharge("ref-1").charge();
+        charges.completeChallenge(charge.id(), false);
+
+        charges.completeChallenge(charge.id(), true);
+
+        assertThat(events).hasSize(1);
+    }
+
+    @Test
+    void shouldPublishNothingForChargeDecidedAtOnce() {
+        charges.charge(request("ref-1", "4111111111111111", "123"));
+
+        assertThat(events).isEmpty();
+    }
+
+    @Test
+    void shouldListChargesSinceTimeNewestFirst() {
+        charges.charge(request("ref-1", "4111111111111111", "123"));
+        clock.advance(Duration.ofMinutes(1));
+        charges.charge(request("ref-2", "4111111111111111", "123"));
+        clock.advance(Duration.ofMinutes(1));
+        charges.charge(request("ref-3", "4000000000000002", "123"));
+
+        assertThat(charges.chargesSince(Instant.parse("2026-11-25T10:01:00Z")))
+                .extracting(Charge::reference)
+                .containsExactly("ref-3", "ref-2");
     }
 
     @Test

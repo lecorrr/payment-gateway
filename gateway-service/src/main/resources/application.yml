@@ -9,6 +9,14 @@ spring:
       connection-init-sql: SET lock_timeout TO '5s'   # a long lock wait fails the request instead of hanging
   flyway:
     locations: classpath:db/migration
+  # Shares the providers' open circuits between gateway instances. Optional: without it each instance goes by its
+  # own circuits, so a payment never waits on Redis for longer than these.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      connect-timeout: 500ms
+      timeout: 500ms
 
 server:
   port: 8090
@@ -26,7 +34,8 @@ gateway:
     fingerprint-key: ${GATEWAY_FINGERPRINT_KEY:}
     # How customers' browsers reach the gateway: they come back here from 3-D Secure challenges.
     public-url: ${GATEWAY_PUBLIC_URL:http://localhost:8090}
-    first-check-after: 30s   # longer than any provider's read timeout below
+    # Longer than a charge can take: every provider's connect timeout below plus the longest read timeout.
+    first-check-after: 30s
     check-interval: 10s
     challenge-check-interval: 1m
     give-up-after: 10m
@@ -45,8 +54,17 @@ gateway:
       - 5h
       - 10h
   providers:
-    # Where new payments are charged: acquirer-sim or monobank. A payment is always looked up where it was charged.
-    active: ${GATEWAY_PROVIDER:acquirer-sim}
+    # Where new payments go, the preferred provider first: acquirer-sim, monobank, or both in either order. A payment
+    # goes to the next provider only when one never got its charge. It is always looked up where it was charged.
+    order: ${GATEWAY_PROVIDERS:acquirer-sim}
+    # A provider is skipped for open-for once failure-rate-percent of its last window-size charges (at least
+    # minimum-calls) got no answer or never got through; then trial-calls charges show whether it is back.
+    circuit-breaker:
+      window-size: 10
+      minimum-calls: 5
+      failure-rate-percent: 50
+      open-for: 30s
+      trial-calls: 2
     acquirer-sim:
       base-url: ${ACQUIRER_SIM_URL:http://localhost:8091}
       api-key: ${ACQUIRER_SIM_API_KEY:}
@@ -65,6 +83,9 @@ management:
     web:
       exposure:
         include: health,info
+  health:
+    redis:
+      enabled: false   # Redis is optional (see spring.data.redis), so it doesn't make the gateway unhealthy
   endpoint:
     health:
       probes:

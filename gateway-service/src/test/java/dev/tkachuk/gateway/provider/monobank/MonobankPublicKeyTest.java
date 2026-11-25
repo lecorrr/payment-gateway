@@ -11,12 +11,10 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import dev.tkachuk.gateway.support.MovableClock;
 import java.nio.charset.StandardCharsets;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -109,33 +107,5 @@ class MonobankPublicKeyTest {
 
     private static ResponseDefinitionBuilder json(String body) {
         return aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody(body);
-    }
-
-    private static final class MovableClock extends Clock {
-
-        private Instant now;
-
-        MovableClock(Instant now) {
-            this.now = now;
-        }
-
-        void move(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
     }
 }

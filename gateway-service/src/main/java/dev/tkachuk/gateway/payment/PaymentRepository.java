@@ -144,6 +144,23 @@ class PaymentRepository {
     }
 
     /**
+     * Moves a payment to another provider, before it is charged there. Only a PROCESSING payment without a provider
+     * reference moves: no provider has its charge yet. Empty otherwise.
+     */
+    Optional<Payment> moveToProvider(UUID id, String provider, Instant now) {
+        return jdbc.sql("""
+                        UPDATE payments
+                        SET provider = :provider, updated_at = :now
+                        WHERE id = :id AND status = 'PROCESSING' AND provider_reference IS NULL
+                        RETURNING *""")
+                .param("id", id)
+                .param("provider", provider)
+                .param("now", utc(now))
+                .query(PaymentRepository::fromRow)
+                .optional();
+    }
+
+    /**
      * Claims the payments due for a check by moving their next check to leaseUntil, or to challengeLeaseUntil for one
      * waiting for its 3-D Secure challenge, so a checker running in another instance skips them. SKIP LOCKED lets
      * instances claim side by side without waiting for each other.

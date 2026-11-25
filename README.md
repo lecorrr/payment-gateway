@@ -5,8 +5,9 @@
 
 A card payment gateway for merchants. A merchant sends a card payment to one REST API; the gateway charges it with
 a payment provider, records the outcome, tells the merchant by a signed webhook, and never stores the card number.
-It has two providers: **acquirer-sim**, a simulated card acquirer, and **monobank**'s acquiring API. acquirer-sim
-and **merchant-sim**, which plays the shop, live in this repository, so everything runs locally.
+It has two providers, **acquirer-sim**, a simulated card acquirer, and **monobank**'s acquiring API, and moves new
+payments to the other one when a provider is down. acquirer-sim, which can also play monobank, and **merchant-sim**,
+which plays the shop, live in this repository, so everything runs locally.
 
 What it does:
 
@@ -25,8 +26,11 @@ What it does:
 - **Tells "not charged" from "don't know".** A refused request or a connection that never opened fails the payment;
   a 5xx, a read timeout or a dropped connection leaves it `PROCESSING` for the checker.
 - **One API, several providers.** Each provider sits behind a connector that turns its API, its statuses and its
-  error codes into the gateway's, so a merchant sees the same decline codes whichever provider charged the card. A
-  setting picks the provider for new payments; every payment is looked up with the provider that charged it.
+  error codes into the gateway's, so a merchant sees the same decline codes whichever provider charged the card.
+  Every payment is looked up with the provider that charged it.
+- **Failover.** New payments go to the providers in a set order, and on to the next one only when a provider never
+  got the charge, so no card is charged twice. A circuit breaker per provider (Resilience4j) skips one that keeps
+  failing, and Redis shares that between gateway instances.
 - **Keeps card data out.** Luhn and expiry checks up front; the card number, CVC and holder are never stored,
   logged or sent in a webhook, and tests check the database rows, the log output and the webhook bodies for them.
 - **Contract first.** The API and the webhook body are written in OpenAPI and their Java types are generated from
@@ -35,15 +39,15 @@ What it does:
 
 ## Stack
 
-Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient), PostgreSQL 17, OpenAPI Generator,
-springdoc, JUnit 5, WireMock, Testcontainers, JaCoCo, Docker, GitLab CI.
+Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis), PostgreSQL 17, Redis 8,
+Resilience4j, OpenAPI Generator, springdoc, JUnit 5, WireMock, Testcontainers, JaCoCo, Docker, GitLab CI.
 
 ## Run it
 
 Needs Java 21 and Docker.
 
-1. Build and test. This runs the unit tests, the integration tests against PostgreSQL in Testcontainers, and the
-   coverage gate:
+1. Build and test. This runs the unit tests, the integration tests against PostgreSQL and Redis in Testcontainers,
+   and the coverage gate:
 
    ```bash
    ./mvnw verify
@@ -55,14 +59,14 @@ Needs Java 21 and Docker.
    printf 'GATEWAY_DEMO_MERCHANT_API_KEY=%s\nGATEWAY_FINGERPRINT_KEY=%s\nACQUIRER_SIM_API_KEY=%s\nGATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET=whsec_%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)" "$(openssl rand -hex 16)" "$(openssl rand -base64 32)" > .env
    ```
 
-   The demo uses ports 8090 (gateway), 8091 (acquirer-sim), 8092 (merchant-sim) and 5436 (PostgreSQL) on
-   localhost. If one is taken, pick others in `.env` and use them in the URLs below, for example:
+   The demo uses ports 8090 (gateway), 8091 (acquirer-sim), 8093 (monobank-sim), 8092 (merchant-sim) and 5436
+   (PostgreSQL) on localhost. If one is taken, pick others in `.env` and use them in the URLs below, for example:
 
    ```bash
-   printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nMERCHANT_SIM_PORT=8192\nGATEWAY_DB_PORT=5446\n' >> .env
+   printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nMONOBANK_SIM_PORT=8193\nMERCHANT_SIM_PORT=8192\nGATEWAY_DB_PORT=5446\n' >> .env
    ```
 
-3. Start the gateway, acquirer-sim, merchant-sim and PostgreSQL:
+3. Start the gateway, both simulated providers, merchant-sim, PostgreSQL and Redis:
 
    ```bash
    docker compose up -d --build
@@ -78,8 +82,9 @@ Needs Java 21 and Docker.
    curl -s -w '\n' -X POST http://localhost:8090/api/v1/payments -H "X-Api-Key: $KEY" -H "Idempotency-Key: order-1001-1" -H "Content-Type: application/json" -d '{"orderId": "ORDER-1001", "amount": 15000, "currency": "UAH", "description": "Two tickets", "card": {"number": "4111 1111 1111 1111", "expiryMonth": 12, "expiryYear": 2030, "cvc": "123"}}'
    ```
 
-   Send the same command again: same payment, HTTP 200 and `Idempotent-Replayed: true`. Change the amount and keep
-   the key: 422 `IDEMPOTENCY_KEY_REUSED`.
+   The answer's `provider` is `monobank`: compose sends new payments to monobank-sim first. Send the same command
+   again: same payment, HTTP 200 and `Idempotent-Replayed: true`. Change the amount and keep the key: 422
+   `IDEMPOTENCY_KEY_REUSED`.
 
 5. Read a payment back by the `id` from the answer, for example to watch the slow test card go from `PROCESSING`
    to `SUCCEEDED`:
@@ -98,8 +103,32 @@ Needs Java 21 and Docker.
    challenge**). The browser ends on merchant-sim's page, which shows the status the webhook brought;
    http://localhost:8092/events lists every webhook merchant-sim received.
 
-The API docs are at http://localhost:8090/swagger-ui.html (use **Authorize** with the key), acquirer-sim's at
-http://localhost:8091/swagger-ui.html. Stop everything with `docker compose down`.
+7. Take monobank away, then pay as in step 4 with a new `Idempotency-Key`:
+
+   ```bash
+   docker compose stop monobank-sim
+   ```
+
+   The payment still succeeds, with `"provider": "acquirer-sim"`: monobank never got the charge, so the gateway
+   gave it to the next provider. After a few such payments monobank's circuit opens, and new payments skip it for
+   30 s at a time without trying it; `docker compose logs gateway` shows when. Meanwhile Redis holds the open
+   circuit for other gateway instances to see:
+
+   ```bash
+   docker compose exec redis redis-cli keys 'payment-gateway:*'
+   ```
+
+   Start monobank-sim again, and once two trial charges get through, new payments go back to it:
+
+   ```bash
+   docker compose start monobank-sim
+   ```
+
+   It comes back with a new signing key, so for up to 10 minutes the gateway refuses its webhooks, as after a key
+   change at monobank; the payments don't depend on them.
+
+The API docs are at http://localhost:8090/swagger-ui.html (use **Authorize** with the key), acquirer-sim's, the
+monobank-style part included, at http://localhost:8091/swagger-ui.html. Stop everything with `docker compose down`.
 
 ### Test cards
 
@@ -162,19 +191,30 @@ at once. Webhooks can come twice and out of order, so go by the payment's `statu
 
 ## Providers
 
-**acquirer-sim** is the default, and the demo above uses it. **monobank** charges through monobank's acquiring API
-with the card's details (`payment-direct`): the payment's id goes as the invoice's reference, 3-D Secure sends the
-customer to monobank's `tdsUrl` and back to `/3ds/return/{id}`, and monobank's error codes become the gateway's
-decline codes. A charge whose answer was lost has no invoice id at the gateway yet, so the checker first finds it in
-monobank's statement by its reference. When monobank can reach the gateway, it also reports invoice changes to
+`GATEWAY_PROVIDERS` lists the providers new payments go to, the preferred one first: `acquirer-sim` when it is not
+set, `monobank,acquirer-sim` in compose. A payment goes on to the next provider only when the one before never got
+the charge: the connection failed, or it was turned away unread with 429. A decline, a timeout or a 5xx stays with
+the provider that had it, since the card may have been charged there. A provider whose charges keep getting no
+answer or not getting through (half of its last ten, at least five) is skipped for 30 s, then two trial charges
+show whether it is back. Gateway instances tell each other through Redis which providers they skip; without Redis
+each instance goes by its own.
+
+**acquirer-sim** has an API of its own. **monobank** charges through monobank's acquiring API with the card's
+details (`payment-direct`): the payment's id goes as the invoice's reference, 3-D Secure sends the customer to
+monobank's `tdsUrl` and back to `/3ds/return/{id}`, and monobank's error codes become the gateway's decline codes. A
+charge whose answer was lost has no invoice id at the gateway yet, so the checker first finds it in monobank's
+statement by its reference. When monobank can reach the gateway, it also reports invoice changes to
 `/providers/monobank/webhooks`; the gateway checks each report's ECDSA signature against monobank's public key and
 then looks the payment up, rather than taking the report's word.
 
-To try it, add these two lines to `.env`, with your token, and run `docker compose up -d` again:
+In compose, monobank is **monobank-sim**: a second acquirer-sim, which also answers the part of monobank's API the
+gateway uses, signed webhooks included. To use the real monobank instead, add these lines to `.env`, with your
+token, and run `docker compose up -d` again; the webhook URL stays empty unless monobank can reach this gateway:
 
 ```
-GATEWAY_PROVIDER=monobank
+MONOBANK_URL=https://api.monobank.ua
 GATEWAY_MONOBANK_TOKEN=
+GATEWAY_MONOBANK_WEBHOOK_URL=
 ```
 
 A test token from [api.monobank.ua](https://api.monobank.ua/) charges nothing: monobank accepts any card number that
@@ -186,7 +226,8 @@ certificate, so whether a token may use it is monobank's call; a refused request
 
 ```
 gateway-service/   the merchant API, 3-D Secure return, webhooks, the acquirer-sim and monobank connectors
-acquirer-sim/      the simulated card acquirer with its challenge pages, a separate app with its own API
+acquirer-sim/      the simulated card acquirer with its challenge pages, a separate app with its own API and a
+                   monobank-style one
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
 ci/                scripts for the pipeline
 docs/              setting up GitLab, its runners and the GitHub mirror
@@ -203,5 +244,4 @@ other modules' too.
 
 ## Next
 
-Routing between providers with failover (Resilience4j, with the circuit state in Redis); refunds; metrics and
-tracing; a Helm chart for several environments.
+A risk check over gRPC before each charge; refunds; metrics and tracing; a Helm chart for several environments.

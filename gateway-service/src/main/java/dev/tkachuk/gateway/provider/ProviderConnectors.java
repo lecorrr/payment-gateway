@@ -1,5 +1,6 @@
 package dev.tkachuk.gateway.provider;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -9,8 +10,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Every connector by its name, and the one new payments go to. A payment is looked up with the connector that
- * charged it, whichever is active now, so switching providers leaves the payments in flight to their own.
+ * Every connector by its name, and the ones new payments go to, in gateway.providers.order. A payment is looked up
+ * with the connector that charged it, whatever the order is now, so changing it leaves the payments in flight to
+ * their own providers.
  */
 @Component
 public class ProviderConnectors {
@@ -18,7 +20,7 @@ public class ProviderConnectors {
     private static final Logger log = LoggerFactory.getLogger(ProviderConnectors.class);
 
     private final Map<String, ProviderConnector> byName = new TreeMap<>();
-    private final ProviderConnector active;
+    private final List<ProviderConnector> ordered;
 
     public ProviderConnectors(List<ProviderConnector> connectors, ProvidersProperties properties) {
         for (ProviderConnector connector : connectors) {
@@ -26,22 +28,27 @@ public class ProviderConnectors {
                 throw new IllegalStateException("Two connectors are named " + connector.name());
             }
         }
-        ProviderConnector chosen = byName.get(properties.active());
-        if (chosen == null) {
-            throw new IllegalArgumentException("gateway.providers.active is " + properties.active()
-                    + ", but the gateway has connectors for " + String.join(", ", byName.keySet()) + " only");
+        List<ProviderConnector> chosen = new ArrayList<>();
+        for (String name : properties.order()) {
+            ProviderConnector connector = byName.get(name);
+            if (connector == null) {
+                throw new IllegalArgumentException("gateway.providers.order names " + name
+                        + ", but the gateway has connectors for " + String.join(", ", byName.keySet()) + " only");
+            }
+            List<String> missing = connector.missingSettings();
+            if (!missing.isEmpty()) {
+                throw new IllegalArgumentException("gateway.providers.order names " + name + ", which needs "
+                        + String.join(", ", missing));
+            }
+            chosen.add(connector);
         }
-        List<String> missing = chosen.missingSettings();
-        if (!missing.isEmpty()) {
-            throw new IllegalArgumentException("gateway.providers.active is " + chosen.name() + ", which needs "
-                    + String.join(", ", missing));
-        }
-        this.active = chosen;
-        log.info("New payments are charged with {}", chosen.name());
+        this.ordered = List.copyOf(chosen);
+        log.info("New payments go to {}", String.join(", then ", properties.order()));
     }
 
-    public ProviderConnector active() {
-        return active;
+    /** The providers new payments go to, the preferred one first. */
+    public List<ProviderConnector> ordered() {
+        return ordered;
     }
 
     public Optional<ProviderConnector> byName(String name) {

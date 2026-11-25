@@ -8,7 +8,8 @@ import org.springframework.context.annotation.Bean;
 
 /**
  * A stand-in for a card acquirer, so the gateway can be run and shown without a real one. It keeps its charges in
- * memory and decides by test card numbers; the API is its own, not the gateway's.
+ * memory and decides by test card numbers. Its API (/v1) is its own, not the gateway's; it also answers the part of
+ * monobank's acquiring API the gateway uses (/api/merchant), so a second copy can stand in for monobank.
  */
 @SpringBootApplication
 @ConfigurationPropertiesScan

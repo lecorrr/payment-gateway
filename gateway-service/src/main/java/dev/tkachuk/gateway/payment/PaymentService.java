@@ -12,6 +12,8 @@ import dev.tkachuk.gateway.provider.ProviderConnector;
 import dev.tkachuk.gateway.provider.ProviderConnectors;
 import dev.tkachuk.gateway.provider.ProviderResult;
 import dev.tkachuk.gateway.provider.ProviderResult.Outcome;
+import dev.tkachuk.gateway.provider.ProviderRoute;
+import dev.tkachuk.gateway.provider.ProviderRouter;
 import dev.tkachuk.gateway.webhook.WebhookOutbox;
 import java.net.URI;
 import java.time.Clock;
@@ -19,8 +21,10 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
@@ -35,7 +39,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * outcome got lost or whose challenge was left unfinished. The provider is called outside any transaction; the
  * payment is stored as PROCESSING before the call, so a crash in between leaves a payment the checker finds, never
  * a charge the gateway doesn't know about. Every status change after that is stored together with its webhook event.
- * New payments go to the active provider; each payment is looked up with the provider that charged it.
+ * A new payment goes to the provider ProviderRouter picks, and on to the next while one turns out unavailable; each
+ * payment is looked up with the provider that charged it.
  */
 @Service
 public class PaymentService implements ChargeNotifications {
@@ -45,17 +50,19 @@ public class PaymentService implements ChargeNotifications {
     private final PaymentRepository payments;
     private final RequestFingerprints fingerprints;
     private final ProviderConnectors providers;
+    private final ProviderRouter router;
     private final WebhookOutbox webhooks;
     private final TransactionTemplate transactions;
     private final PaymentProperties properties;
     private final Clock clock;
 
     PaymentService(PaymentRepository payments, RequestFingerprints fingerprints, ProviderConnectors providers,
-            WebhookOutbox webhooks, PlatformTransactionManager transactionManager, PaymentProperties properties,
-            Clock clock) {
+            ProviderRouter router, WebhookOutbox webhooks, PlatformTransactionManager transactionManager,
+            PaymentProperties properties, Clock clock) {
         this.payments = payments;
         this.fingerprints = fingerprints;
         this.providers = providers;
+        this.router = router;
         this.webhooks = webhooks;
         this.transactions = new TransactionTemplate(transactionManager);
         this.properties = properties;
@@ -78,26 +85,28 @@ public class PaymentService implements ChargeNotifications {
         if (expiry.isExpiredOn(LocalDate.ofInstant(now, ZoneOffset.UTC))) {
             throw new GatewayException(ErrorCode.CARD_EXPIRED, "The card expired at the end of " + expiry);
         }
-        ProviderConnector provider = providers.active();
-        Payment payment = newPayment(merchantId, idempotencyKey, fingerprint, request, provider.name(), now);
-        if (!payments.insertIfAbsent(payment)) {
+        // The provider is picked before the payment is stored, so the payment names it from the start.
+        Optional<ProviderRoute> route = router.next(Set.of());
+        String provider = route.map(picked -> picked.provider().name())
+                .orElseGet(() -> providers.ordered().getFirst().name());
+        Payment payment = newPayment(merchantId, idempotencyKey, fingerprint, request, provider, now);
+        if (!insertIfAbsent(payment, route)) {
             // A request with the same key was stored between the lookup above and this insert.
             Payment first = payments.findByIdempotencyKey(merchantId, idempotencyKey).orElseThrow(
                     () -> new IllegalStateException("Idempotency-Key " + idempotencyKey + " is taken, but not found"));
             return replay(first, fingerprint);
         }
-        log.info("Payment {} for order {} created, charging it with {}", payment.id(), payment.orderId(),
-                provider.name());
-
-        ProviderResult result = provider.charge(new ChargeRequest(payment.id(), payment.amount(), payment.currency(),
-                request.card(), request.description(), challengeReturnUrl(payment.id())));
-        Payment recorded = record(payment, result);
-        if (recorded.status() == PaymentStatus.PROCESSING) {
-            String why = result.outcome() == Outcome.PENDING ? "is still working on it" : "gave no outcome";
-            log.info("Payment {} stays PROCESSING: {} {}; first check at {}", payment.id(), provider.name(), why,
-                    payment.nextCheckAt());
+        if (route.isEmpty()) {
+            log.warn("Payment {} for order {} created, but every provider is failing", payment.id(),
+                    payment.orderId());
+            return new PaymentResult(finish(payment, PaymentStatus.FAILED, null, FailureCodes.PROVIDER_UNAVAILABLE),
+                    false);
         }
-        return new PaymentResult(recorded, false);
+        log.info("Payment {} for order {} created, charging it with {}", payment.id(), payment.orderId(), provider);
+
+        ChargeRequest charge = new ChargeRequest(payment.id(), payment.amount(), payment.currency(), request.card(),
+                request.description(), challengeReturnUrl(payment.id()));
+        return new PaymentResult(charge(payment, route.get(), charge), false);
     }
 
     public Payment get(UUID merchantId, UUID paymentId) {
@@ -161,6 +170,63 @@ public class PaymentService implements ChargeNotifications {
             }
         }
         return due.size();
+    }
+
+    /**
+     * Charges with the route's provider, and with the next one while a provider turns out unavailable: it never got
+     * the charge, so the next can't charge the card twice. Every other result stays with the provider that gave it,
+     * a lost answer too. The payment is moved to the next provider before that one is called.
+     */
+    private Payment charge(Payment payment, ProviderRoute firstRoute, ChargeRequest request) {
+        Payment current = payment;
+        ProviderRoute route = firstRoute;
+        Set<String> tried = new HashSet<>();
+        while (true) {
+            String provider = route.provider().name();
+            ProviderResult result = route.charge(request);
+            tried.add(provider);
+            Optional<ProviderRoute> next = result.isUnavailable() ? router.next(tried) : Optional.empty();
+            if (next.isEmpty()) {
+                Payment recorded = record(current, result);
+                if (recorded.status() == PaymentStatus.PROCESSING) {
+                    String why = result.outcome() == Outcome.PENDING ? "is still working on it" : "gave no outcome";
+                    log.info("Payment {} stays PROCESSING: {} {}; first check at {}", current.id(), provider, why,
+                            current.nextCheckAt());
+                }
+                return recorded;
+            }
+            String nextProvider = next.get().provider().name();
+            Optional<Payment> moved;
+            try {
+                moved = payments.moveToProvider(current.id(), nextProvider, now());
+            } catch (RuntimeException e) {
+                next.get().release();
+                throw e;
+            }
+            if (moved.isEmpty()) {
+                // Something recorded an outcome meanwhile; that one stands.
+                next.get().release();
+                return current(current);
+            }
+            log.info("Payment {}: {} can't take it, charging it with {}", current.id(), provider, nextProvider);
+            current = moved.get();
+            route = next.get();
+        }
+    }
+
+    // A route's permit must go back to its circuit unless the provider is called.
+    private boolean insertIfAbsent(Payment payment, Optional<ProviderRoute> route) {
+        boolean inserted;
+        try {
+            inserted = payments.insertIfAbsent(payment);
+        } catch (RuntimeException e) {
+            route.ifPresent(ProviderRoute::release);
+            throw e;
+        }
+        if (!inserted) {
+            route.ifPresent(ProviderRoute::release);
+        }
+        return inserted;
     }
 
     private Payment newPayment(UUID merchantId, String idempotencyKey, String fingerprint, NewPayment request,

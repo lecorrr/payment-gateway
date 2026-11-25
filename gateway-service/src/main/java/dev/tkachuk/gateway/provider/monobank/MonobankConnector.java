@@ -37,7 +37,6 @@ class MonobankConnector implements ProviderConnector {
 
     // Room for the gateway's clock and monobank's to differ when the statement is searched from the charge's time.
     private static final Duration STATEMENT_MARGIN = Duration.ofMinutes(1);
-    private static final int TOO_MANY_REQUESTS = 429;
 
     private static final Logger log = LoggerFactory.getLogger(MonobankConnector.class);
 
@@ -68,11 +67,10 @@ class MonobankConnector implements ProviderConnector {
         try {
             Invoice invoice = client.payDirect(PaymentDirectRequest.from(request, webhookUrl));
             return resultOf(withErrCode(invoice), reference);
+        } catch (HttpClientErrorException.TooManyRequests e) {
+            log.warn("monobank turned the charge for payment {} away: HTTP 429, too many requests", reference);
+            return ProviderResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
         } catch (HttpClientErrorException e) {
-            if (e.getStatusCode().value() == TOO_MANY_REQUESTS) {
-                log.warn("monobank turned the charge for payment {} away: HTTP 429, too many requests", reference);
-                return ProviderResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
-            }
             log.warn("monobank refused the charge for payment {}: HTTP {}", reference, e.getStatusCode().value());
             return ProviderResult.failed(FailureCodes.PROVIDER_REJECTED_REQUEST);
         } catch (HttpServerErrorException e) {

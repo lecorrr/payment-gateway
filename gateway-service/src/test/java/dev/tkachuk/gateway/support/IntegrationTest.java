@@ -9,12 +9,16 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.client.WireMock;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -22,11 +26,13 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
 /**
- * The service against PostgreSQL in Testcontainers, with WireMock as acquirer-sim, as monobank and as a merchant's
- * webhook endpoint, and short timings: the providers time out after 700 ms, a payment is first looked up after 1 s
- * and given up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms apart. New
- * payments go to acquirer-sim. All integration tests share this one context, so they share its containers too.
- * Every test starts with no payments, no webhook events and only the demo merchant, which has no webhook endpoint.
+ * The service against PostgreSQL and Redis in Testcontainers, with WireMock as acquirer-sim, as monobank and as a
+ * merchant's webhook endpoint, and short timings: the providers time out after 700 ms, a payment is first looked up
+ * after 1 s and given up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms
+ * apart. New payments go to acquirer-sim, and to monobank when acquirer-sim is unavailable; a provider's circuit
+ * opens for 10 s once half of its last charges (at least 2, at most 4) failed. All integration tests share this one
+ * context, so they share its containers too. Every test starts with no payments, no webhook events, only the demo
+ * merchant, which has no webhook endpoint, and every circuit closed.
  */
 @SpringBootTest(properties = {
         "gateway.demo-merchant.api-key=" + IntegrationTest.DEMO_API_KEY,
@@ -36,6 +42,12 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
         "gateway.payments.check-interval=200ms",
         "gateway.payments.challenge-check-interval=300ms",
         "gateway.payments.give-up-after=2s",
+        "gateway.providers.order=acquirer-sim,monobank",
+        "gateway.providers.circuit-breaker.window-size=4",
+        "gateway.providers.circuit-breaker.minimum-calls=2",
+        "gateway.providers.circuit-breaker.failure-rate-percent=50",
+        "gateway.providers.circuit-breaker.open-for=10s",
+        "gateway.providers.circuit-breaker.trial-calls=1",
         "gateway.providers.acquirer-sim.api-key=test-acquirer-key-0123456789",
         "gateway.providers.acquirer-sim.connect-timeout=300ms",
         "gateway.providers.acquirer-sim.read-timeout=700ms",
@@ -47,7 +59,8 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
         "gateway.webhooks.read-timeout=1s",
         "gateway.webhooks.retry-delays=200ms,200ms"})
 @AutoConfigureMockMvc
-@Import({PostgresTestcontainer.class, AcquirerStub.class, MonobankStub.class, MerchantEndpointStub.class})
+@Import({PostgresTestcontainer.class, RedisTestcontainer.class, AcquirerStub.class, MonobankStub.class,
+        MerchantEndpointStub.class})
 public abstract class IntegrationTest {
 
     protected static final String DEMO_API_KEY = "test-demo-merchant-key-0123456789";
@@ -74,7 +87,14 @@ public abstract class IntegrationTest {
     @Qualifier("merchantEndpoint")
     protected WireMockServer merchantEndpoint;
 
+    @Autowired
+    protected CircuitBreakerRegistry circuitBreakers;
+
+    @Autowired
+    protected StringRedisTemplate redis;
+
     // The tables first, so the checker and the dispatcher have nothing left to send by the time the stubs are reset.
+    // Circuits before Redis: a circuit that closes removes its mark there.
     @BeforeEach
     void startClean() {
         jdbc.execute("TRUNCATE webhook_events, payments");
@@ -83,6 +103,11 @@ public abstract class IntegrationTest {
         acquirer.resetAll();
         monobank.resetAll();
         merchantEndpoint.resetAll();
+        circuitBreakers.getAllCircuitBreakers().forEach(CircuitBreaker::reset);
+        Set<String> keys = redis.keys("*");
+        if (keys != null && !keys.isEmpty()) {
+            redis.delete(keys);
+        }
     }
 
     protected ResultActions createPayment(String apiKey, String idempotencyKey, String body) throws Exception {
