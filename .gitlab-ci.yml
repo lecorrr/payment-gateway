@@ -1,12 +1,18 @@
-# Runs on the project runner set up in docs/gitlab-setup.md. Each job gets its own Docker-in-Docker daemon, for
-# Testcontainers and docker build; that needs a runner with privileged = true.
+# Runs on GitLab's small Linux runners (docs/gitlab-setup.md), which allow the privileged containers that
+# Docker-in-Docker needs. Each job gets its own Docker daemon, for Testcontainers and docker build.
 
 stages:
   - test
   - package
 
+default:
+  # Only GitLab's runners have this tag. A runner on your own machine would show that machine's internet address in
+  # the details of every job it runs, and this project's jobs are public.
+  tags:
+    - saas-linux-small-amd64
+
 variables:
-  # Maven and the Maven wrapper download into the project folder, so the runner cache can keep both.
+  # Maven and the Maven wrapper download into the project folder, so GitLab's cache can keep both.
   MAVEN_USER_HOME: "$CI_PROJECT_DIR/.m2"
   MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
   MAVEN_CLI_OPTS: "--batch-mode --no-transfer-progress"
@@ -24,7 +30,10 @@ variables:
   services:
     - name: docker:29-dind
       alias: docker
-      command: ["--tls=false"]
+      # Docker Hub limits anonymous pulls per IP address, and GitLab's runners share theirs with other projects.
+      # Google's copy of Docker Hub serves postgres and the Java base image instead; Docker Hub itself still serves
+      # anything the copy lacks.
+      command: ["--tls=false", "--registry-mirror=https://mirror.gcr.io"]
 
 # Unit tests, integration tests against PostgreSQL in Testcontainers, and the coverage gate (80 % of lines per
 # module): any of them failing fails the pipeline.

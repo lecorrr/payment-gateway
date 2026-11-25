@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-11-25)
+
+- The pipeline runs on GitLab's own runners, picked by their tag, instead of a runner on the developer's machine:
+  GitLab shows a runner's internet address in the job details of a public project.
+- Docker-in-Docker pulls Docker Hub images through Google's copy of Docker Hub, since GitLab's runners share their
+  addresses and Docker Hub limits anonymous pulls per address.
+
 ## 0.3.0 (2026-11-25)
 
 - monobank: a second provider, through monobank's acquiring API. It charges with the card's details

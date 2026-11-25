@@ -189,7 +189,7 @@ gateway-service/   the merchant API, 3-D Secure return, webhooks, the acquirer-s
 acquirer-sim/      the simulated card acquirer with its challenge pages, a separate app with its own API
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
 ci/                scripts for the pipeline
-docs/              setting up GitLab, the runner and the GitHub mirror
+docs/              setting up GitLab, its runners and the GitHub mirror
 ```
 
 How the parts fit, and why: [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -197,7 +197,7 @@ How the parts fit, and why: [ARCHITECTURE.md](ARCHITECTURE.md).
 ## CI
 
 The repository lives on [GitLab](https://gitlab.com/lecorrr/payment-gateway), where every push runs the tests, the
-coverage gate and the image builds on a self-hosted runner ([docs/gitlab-setup.md](docs/gitlab-setup.md)). The
+coverage gate and the image builds on GitLab's own runners ([docs/gitlab-setup.md](docs/gitlab-setup.md)). The
 GitHub copy is a mirror of it. The coverage badge shows gateway-service's line coverage; the pipeline log has the
 other modules' too.
 

@@ -1,7 +1,7 @@
-# GitLab: the project, a runner on your desktop, and a GitHub mirror
+# GitLab: the project, its runners, and a GitHub mirror
 
-The repository lives on GitLab, where the pipeline runs. The jobs run on a runner on your own desktop, so they
-use none of GitLab's compute minutes, and GitHub gets a mirror of every push.
+The repository lives on GitLab, where the pipeline runs on GitLab's own runners, and GitHub gets a mirror of every
+push.
 
 The commands below assume the GitLab and GitHub username `lecorrr`; change it if yours differs.
 
@@ -13,9 +13,7 @@ The commands below assume the GitLab and GitHub username `lecorrr`; change it if
    Advanced > Transfer project**. Then delete the empty group; GitLab keeps it for 30 days before removing it.
 2. **New project > Create blank project**: name `payment-gateway`, visibility **Public**, and untick
    **Initialize repository with a README** (the repository is pushed from your machine).
-3. In the project, **Settings > CI/CD > Runners**: turn off **Instance runners**, so jobs wait for your runner and
-   never use compute minutes.
-4. Add your SSH public key under **User settings > SSH keys > Add new key**. GitLab fills in an expiry date a year
+3. Add your SSH public key under **User settings > SSH keys > Add new key**. GitLab fills in an expiry date a year
    ahead and emails you before the key expires. Then check that the key works:
 
    ```bash
@@ -27,67 +25,24 @@ The commands below assume the GitLab and GitHub username `lecorrr`; change it if
    ([GitLab's published host keys](https://docs.gitlab.com/user/gitlab_com/#ssh-host-keys-fingerprints)). The
    answer ends with `Welcome to GitLab, @lecorrr!`.
 
-GitLab may ask you to verify the account before the first pipeline. GitLab lists phone verification for Ukraine as
-partial support, so if the code never arrives, use the card option instead.
+GitLab may ask you to verify the account with a phone number. GitLab lists phone verification for Ukraine as partial
+support, so if the code never arrives, use the card option instead.
 
-## 2. The runner
+## 2. GitLab's runners
 
-The runner itself runs in a container and starts each job as another container on your desktop's Docker. The jobs
-use Docker-in-Docker for Testcontainers, which needs privileged containers, so the runner takes jobs from this
-project only, and only from protected branches.
+The jobs ask for GitLab's small Linux runner by its tag, `saas-linux-small-amd64`. It runs each job in a fresh
+virtual machine and allows the privileged containers that the jobs' Docker-in-Docker needs.
 
-1. **Settings > CI/CD > Runners > Create project runner**:
-   - tick **Run untagged jobs** (the jobs in `.gitlab-ci.yml` have no tags);
-   - tick **Protected**, so only protected branches such as `main` run on it. A pipeline for someone else's merge
-     request then never runs on your machine, even if it is started in this project;
-   - tick **Lock to current projects**;
-   - description: the machine, for example `archi desktop`.
+1. In the project, **Settings > CI/CD > Runners**: turn on **Instance runners**. A new project has them on.
+2. GitLab runs a new account's jobs on its runners only once the account is validated. Until then the pipeline fails
+   with a message that asks you to validate the account, and a button for it. GitLab checks a credit or debit card
+   there and says it doesn't charge it. Then retry the pipeline.
+3. A free account gets 400 compute minutes a month on these runners. **User settings > Usage quotas** shows how many
+   are used.
 
-   Then **Create runner**. GitLab shows a token starting with `glrt-`. Leave that page open: the token goes into the
-   register command below and nowhere else.
-2. Make a volume for the runner's configuration:
-
-   ```bash
-   docker volume create gitlab-runner-config
-   ```
-
-3. Start the runner, restarting with Docker:
-
-   ```bash
-   docker run -d --name gitlab-runner --restart always -v /var/run/docker.sock:/var/run/docker.sock -v gitlab-runner-config:/etc/gitlab-runner gitlab/gitlab-runner:latest
-   ```
-
-4. Register it:
-
-   ```bash
-   docker run --rm -it -v gitlab-runner-config:/etc/gitlab-runner gitlab/gitlab-runner:latest register --url https://gitlab.com --executor docker --docker-image eclipse-temurin:21-jdk --docker-privileged --docker-pull-policy if-not-present
-   ```
-
-   It asks for the URL (press Enter), the token (paste it), a name (for example `archi`), and the executor and the
-   image (press Enter for both). `if-not-present` lets jobs reuse the images already on your desktop instead of
-   pulling them each time.
-
-   The terminal shows the token as you paste it, so don't share that output. If the token gets out anyway, replace
-   it. This gets a new token from GitLab and saves it in the runner's configuration; the old one stops working:
-
-   ```bash
-   docker run --rm -v gitlab-runner-config:/etc/gitlab-runner gitlab/gitlab-runner:latest reset-token --name archi
-   ```
-
-   Then restart the runner so it uses the new token:
-
-   ```bash
-   docker restart gitlab-runner
-   ```
-
-5. The runner shows as online on the **Runners** page. Its log, if it doesn't:
-
-   ```bash
-   docker logs --tail 50 gitlab-runner
-   ```
-
-To stop it, `docker stop gitlab-runner`. To remove it for good: `docker rm -f gitlab-runner`, then
-`docker volume rm gitlab-runner-config`, then delete the runner on the **Runners** page.
+A runner on your own machine would work too, without compute minutes. But GitLab shows the internet address a runner
+connects from in the details of every job it runs, and in a public project anyone can read them. The tag keeps this
+project's jobs off such a runner.
 
 ## 3. First push
 
@@ -99,12 +54,9 @@ git remote add origin git@gitlab.com:lecorrr/payment-gateway.git
 git push -u origin main
 ```
 
-GitLab protects `main` on the first push (only Maintainers push or merge, and force pushes are off), so its pipeline
-runs on the protected runner. The pipeline starts by itself (**Build > Pipelines**). The first run pulls the images
-and the Maven dependencies and takes a few minutes; later runs use the runner's cache.
-
-Other branches aren't protected, so their jobs wait without a runner. To run them on your desktop as well, protect
-them too in **Settings > Repository > Protected branches**, for example with a `feature/*` wildcard.
+GitLab protects `main` on the first push: only Maintainers push or merge, and force pushes are off. The pipeline
+starts by itself (**Build > Pipelines**). Each job starts on a fresh machine and pulls its images; the Maven
+dependencies come from GitLab's cache after the first run.
 
 ## 4. Mirror to GitHub
 
@@ -135,10 +87,10 @@ the mirror and add it again.
 
 ## When a job fails
 
-- **The job waits in pending with no runner**: the runner is offline (see its log above), or the branch isn't
-  protected and the runner only takes protected branches.
-- **Cannot connect to the Docker daemon at tcp://docker:2375**: the runner is not privileged. Set
-  `privileged = true` under `[runners.docker]` in the runner's `config.toml` (in the `gitlab-runner-config`
-  volume), then `docker restart gitlab-runner`.
-- **toomanyrequests** from Docker Hub: each pipeline pulls a few images into its fresh Docker-in-Docker, and Docker
-  Hub limits anonymous pulls per IP address. Wait for the limit to reset, or log the runner in to Docker Hub.
+- **The job is stuck, with no runner for its tags**: instance runners are off for the project (section 2).
+- **The pipeline asks you to validate the account**: section 2, step 2.
+- **Cannot connect to the Docker daemon at tcp://docker:2375**: the job's Docker-in-Docker service didn't start.
+  Run the pipeline again from **Build > Pipelines > New pipeline** with the variable `CI_DEBUG_SERVICES` set to
+  `true`, and the job log shows the service's own log.
+- **toomanyrequests** from Docker Hub: an image that Google's copy of Docker Hub lacks came from Docker Hub, which
+  limits anonymous pulls per IP address, and GitLab's runners share theirs. Retry the job later.
