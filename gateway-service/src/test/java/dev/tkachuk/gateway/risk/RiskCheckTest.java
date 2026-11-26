@@ -15,6 +15,8 @@ import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
@@ -38,6 +40,7 @@ class RiskCheckTest {
 
     private final FakeRiskService riskService = new FakeRiskService();
     private final MovableClock clock = new MovableClock(Instant.parse("2026-11-25T10:00:00Z"));
+    private final MeterRegistry meters = new SimpleMeterRegistry();
     private Server server;
     private ManagedChannel channel;
 
@@ -66,6 +69,7 @@ class RiskCheckTest {
         assertThat(asked.getCurrency()).isEqualTo("UAH");
         assertThat(asked.getCardToken()).isEqualTo(REQUEST.cardToken());
         assertThat(asked.getCardBin()).isEqualTo("411111");
+        assertThat(checks("allowed")).isEqualTo(1);
     }
 
     @Test
@@ -73,6 +77,7 @@ class RiskCheckTest {
         riskService.decline("too_many_payments");
 
         assertThat(riskCheck(ALLOW_WHEN_UNAVAILABLE).check(REQUEST)).isEqualTo(RiskVerdict.DECLINE);
+        assertThat(checks("declined")).isEqualTo(1);
     }
 
     @Test
@@ -81,6 +86,8 @@ class RiskCheckTest {
 
         assertThat(riskCheck(ALLOW_WHEN_UNAVAILABLE).check(REQUEST)).isEqualTo(RiskVerdict.ALLOW);
         assertThat(riskCheck(DECLINE_WHEN_UNAVAILABLE).check(REQUEST)).isEqualTo(RiskVerdict.FAIL);
+        assertThat(checks("unavailable")).isEqualTo(2);
+        assertThat(checks("allowed")).isZero();
     }
 
     @Test
@@ -112,6 +119,8 @@ class RiskCheckTest {
 
         assertThat(riskCheck.check(REQUEST)).isEqualTo(RiskVerdict.ALLOW);
         assertThat(riskService.requests()).hasSize(5);
+        assertThat(meters.get("resilience4j.circuitbreaker.state").tags("name", "risk-service", "state", "open")
+                .gauge().value()).isEqualTo(1);
 
         clock.move(OPEN_FOR.plusSeconds(1));
         riskService.reset();
@@ -134,6 +143,10 @@ class RiskCheckTest {
 
     private RiskCheck riskCheck(RiskProperties properties) {
         return new RiskCheck(RiskServiceGrpc.newBlockingStub(channel),
-                new RiskClientConfiguration().riskServiceCircuit(properties, clock), properties);
+                new RiskClientConfiguration().riskServiceCircuit(properties, clock, meters), properties, meters);
+    }
+
+    private double checks(String answer) {
+        return meters.counter(RiskCheck.CHECKS, "answer", answer).count();
     }
 }

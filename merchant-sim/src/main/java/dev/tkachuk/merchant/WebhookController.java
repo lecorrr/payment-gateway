@@ -18,20 +18,23 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * POST /webhooks takes the gateway's webhooks: the signature is checked on the raw body first, then the event is
- * taken once per webhook-id. GET /events lists what came.
+ * POST /webhooks takes the gateway's webhooks, a payment's or a refund's: the signature is checked on the raw body
+ * first, then the event is taken once per webhook-id. GET /events lists what came.
  */
 @RestController
 class WebhookController {
 
     private static final Logger log = LoggerFactory.getLogger(WebhookController.class);
 
-    /** The parts of the gateway's PaymentEvent the shop reads. */
+    /**
+     * The parts of the gateway's PaymentEvent and RefundEvent the shop reads. A refund's data has the id of its
+     * payment in paymentId; a payment's has none.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    record PaymentEvent(String type, Instant timestamp, Payment data) {
+    record GatewayEvent(String type, Instant timestamp, Data data) {
 
         @JsonIgnoreProperties(ignoreUnknown = true)
-        record Payment(String id, String status) {
+        record Data(String id, String status, String paymentId) {
         }
     }
 
@@ -66,21 +69,27 @@ class WebhookController {
                     delivery, properties.failFirst());
             return text(HttpStatus.SERVICE_UNAVAILABLE, "Failing on purpose; try again");
         }
-        PaymentEvent event;
+        GatewayEvent event;
         try {
-            event = jsonMapper.readValue(body, PaymentEvent.class);
+            event = jsonMapper.readValue(body, GatewayEvent.class);
         } catch (JacksonException e) {
-            log.warn("Webhook {} refused: its body is no payment event", messageId);
-            return text(HttpStatus.BAD_REQUEST, "The body is no payment event");
+            log.warn("Webhook {} refused: its body is no payment or refund event", messageId);
+            return text(HttpStatus.BAD_REQUEST, "The body is no payment or refund event");
         }
-        if (event.data() == null) {
-            return text(HttpStatus.BAD_REQUEST, "The event has no payment");
+        if (event.data() == null || event.data().id() == null) {
+            return text(HttpStatus.BAD_REQUEST, "The event has no payment or refund");
         }
-        boolean taken = events.take(messageId, event.type(), event.data().id(), event.data().status(),
-                event.timestamp(), clock.instant());
-        if (taken) {
-            log.info("Webhook {} {}: payment {} is {}", messageId, event.type(), event.data().id(),
-                    event.data().status());
+        GatewayEvent.Data data = event.data();
+        boolean refund = data.paymentId() != null;
+        String paymentId = refund ? data.paymentId() : data.id();
+        String refundId = refund ? data.id() : null;
+        boolean taken = events.take(messageId, event.type(), paymentId, refundId, data.status(), event.timestamp(),
+                clock.instant());
+        if (taken && refund) {
+            log.info("Webhook {} {}: refund {} of payment {} is {}", messageId, event.type(), refundId, paymentId,
+                    data.status());
+        } else if (taken) {
+            log.info("Webhook {} {}: payment {} is {}", messageId, event.type(), paymentId, data.status());
         } else {
             log.info("Webhook {} came again, delivery {}: already taken, nothing to do", messageId, delivery);
         }

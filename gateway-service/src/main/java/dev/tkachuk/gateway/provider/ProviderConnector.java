@@ -5,7 +5,7 @@ import java.util.List;
 /**
  * One payment provider (an acquirer, a PSP) behind the gateway. A connector translates between the provider's API
  * and these types, quirks included, and never throws for the provider's sake: whatever happens on the wire ends up
- * as a ProviderResult.
+ * as a ProviderResult, or a ProviderRefundResult for a refund.
  */
 public interface ProviderConnector {
 
@@ -20,6 +20,15 @@ public interface ProviderConnector {
 
     /** What the provider knows about the charge now. */
     ProviderResult lookup(ChargeLookup lookup);
+
+    /**
+     * Gives all or part of a charge back to the card. The reference is the refund's id and goes to the provider with
+     * the refund, so a refund whose answer was lost can still be found, and is never sent twice.
+     */
+    ProviderRefundResult refund(RefundRequest request);
+
+    /** What the provider knows about the refund now. */
+    ProviderRefundResult lookupRefund(RefundLookup lookup);
 
     /**
      * The settings this connector still needs before it can charge, by name; empty when it has them all. The

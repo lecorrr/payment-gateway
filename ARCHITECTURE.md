@@ -1,8 +1,9 @@
 # Architecture
 
-Four Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments: it asks
-risk-service about each new payment, and charges cards with acquirer-sim and with monobank's acquiring API, moving a
-payment on to the other one when a provider can't take it. **risk-service** decides, over gRPC, whether a payment
+Four Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments and their
+refunds: it asks risk-service about each new payment, charges cards with acquirer-sim and with monobank's acquiring
+API, moving a payment on to the other one when a provider can't take it, and refunds through the provider that
+charged. **risk-service** decides, over gRPC, whether a payment
 may go ahead, and keeps nothing but each card's recent payments in Redis. **acquirer-sim** plays a card acquirer
 behind the gateway, with its own API, error format and naming (snake_case), the way a real provider would, and under
 `/api/merchant` the part of monobank's API the gateway uses, so a second copy of it can play monobank;
@@ -10,7 +11,7 @@ behind the gateway, with its own API, error format and naming (snake_case), the 
 Secure. **risk-api** is no app: it holds the gRPC contract, risk.proto, and the Java code generated from it, which
 the gateway and risk-service both build on. Apart from that contract the apps share no code: merchant-sim checks
 webhook signatures with its own code, and a test in each app checks the same published signature example, so the two
-sides can't drift apart.
+sides can't drift apart. In compose, Prometheus, Grafana and Jaeger watch all of them (see Observability).
 
 ## Modules of gateway-service
 
@@ -20,9 +21,9 @@ sides can't drift apart.
 | `card`     | card number (Luhn, brand, masking), expiry, CVC; no framework imports                   | common                         |
 | `webhook`  | merchants' webhook endpoints and secrets, the outbox, signing, the dispatcher           | common                         |
 | `merchant` | merchants, the API key filter, the current merchant, the demo merchant                  | common, webhook                |
-| `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ChargeLookup`, `ProviderResult`), the connectors by name, the routing between them (`ProviderRouter`), `ChargeNotifications`; one package per provider below it (`acquirersim`, `monobank`) | common, card |
+| `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ChargeLookup`, `ProviderResult`, `RefundRequest`, `RefundLookup`, `ProviderRefundResult`), the connectors by name, the routing between them (`ProviderRouter`), `ChargeNotifications` and `RefundNotifications`; one package per provider below it (`acquirersim`, `monobank`) | common, card |
 | `risk`     | the client of risk-service (`RiskCheck`, `RiskVerdict`) and the circuit breaker in front of it | common                         |
-| `payment`  | the API controller, `PaymentService`, the payments table, fingerprints and card tokens, the checker, the 3-D Secure return | common, card, merchant, provider, risk, webhook, api |
+| `payment`  | the API controllers, `PaymentService` and `RefundService`, the payments and refunds tables, fingerprints and card tokens, the checkers, the 3-D Secure return, the payment and refund metrics | common, card, merchant, provider, risk, webhook, api |
 
 `api` is the interface and DTOs generated from
 [payment-gateway.yaml](gateway-service/src/main/resources/static/openapi/payment-gateway.yaml), the webhook body
@@ -79,6 +80,45 @@ lookup changes nothing, since it says nothing about the charge, and the payment 
 
 Only states that can't be wrong are written: a payment is never marked `FAILED` while the card may have been
 charged, and a challenge is never given up by the gateway while the bank may still approve it.
+
+## A refund, step by step
+
+1. `RefundsController` takes `POST /api/v1/payments/{id}/refunds` with an amount and an `Idempotency-Key`; the
+   fingerprint covers the payment and the amount. A refund with this key already there is replayed (200) or, for
+   another payment or amount, refused with 422 `IDEMPOTENCY_KEY_REUSED`.
+2. In one transaction, `RefundService` locks the payment's row (`SELECT ... FOR UPDATE`) and then checks: the key
+   again, since a request with the same key may have stored its refund while this one waited for the lock; that the
+   payment is the merchant's (404 otherwise) and `SUCCEEDED` (409 `PAYMENT_NOT_REFUNDABLE`); and that the amount fits
+   in what is left, the payment's amount less its `PROCESSING` and `SUCCEEDED` refunds (409
+   `REFUND_AMOUNT_TOO_LARGE`). The refund is inserted as `PROCESSING` with its first check due, and the transaction
+   commits, letting the next refund of the payment in.
+3. The provider that charged the payment is called outside any transaction, with the charge's id at the provider
+   and the refund's id as the reference: acquirer-sim's `POST /v1/refunds`, or monobank's `invoice/cancel` with the
+   refund's id as `extRef`. The answer maps as a charge's does:
+
+   | What happened                                          | Outcome   | Refund                                |
+   |--------------------------------------------------------|-----------|---------------------------------------|
+   | refunded                                               | SUCCEEDED | `SUCCEEDED`                           |
+   | declined                                               | FAILED    | `FAILED` with `refund_declined`       |
+   | still processing                                       | PENDING   | stays `PROCESSING`                    |
+   | other 4xx: the request itself was refused              | FAILED    | `FAILED`, `provider_rejected_request` |
+   | connection refused, unknown host, connect timeout, 429 | FAILED    | `FAILED`, `provider_unavailable`      |
+   | 5xx, read timeout, dropped connection, unreadable body | UNKNOWN   | stays `PROCESSING`                    |
+
+4. The outcome is written with `UPDATE ... WHERE status = 'PROCESSING'`, in one transaction with its webhook event
+   and, for `SUCCEEDED`, the payment's `refunded_amount`. Whichever of the request, the checker and a provider's
+   webhook writes first, that one stands. A `FAILED` refund no longer counts against the payment, so its amount can
+   be asked for again with a new key.
+
+`PendingRefundChecker` does for refunds what the payments' checker does, with the same timings: it claims the due ones
+with `SKIP LOCKED`, looks each up with its provider by the refund's id (acquirer-sim's `GET /v1/refunds?reference=`, or
+the `cancelList` of monobank's invoice, by `extRef`), and makes a refund `FAILED`, `provider_no_record`, only when the
+provider still has no record of it after `give-up-after`.
+
+Without the lock, two refunds sent at once would both read the same amount left and both be stored. With it the
+second waits for the first to commit and then counts the first's refund too. `refunded_amount` has a constraint
+(between 0 and the payment's amount) as a last guard, and refunds never change the payment's status: a refunded
+payment is still a `SUCCEEDED` one, with its `refundedAmount` telling how much came back.
 
 ## Routing
 
@@ -172,14 +212,16 @@ With `gateway.providers.monobank.webhook-url` set, monobank reports each change 
 the body's exact bytes, matches monobank's public key; the key is fetched from `/api/merchant/pubkey` once and
 again, at most every 10 minutes, when a signature doesn't match. Even a signed report is only a reason to ask:
 through `ChargeNotifications`, the payment is looked up with monobank again, so a report that comes late or out of
-order can't set a payment back.
+order can't set a payment back. The same report goes to `RefundNotifications`, which looks up each of the payment's
+refunds still `PROCESSING` in the invoice's `cancelList`, so a report about a refund settles it at once; monobank-sim
+sends one when a refund finishes, and without a report the checker finds the outcome.
 
 ## Webhooks
 
-- **Outbox.** `WebhookOutbox.add` runs inside the transaction of the payment change and refuses to run outside
-  one, so an event exists exactly when its change does: no event for a change that rolled back, no change without
-  its event. The body is stored as the exact text that will be signed and sent (`text`, not `jsonb`, which would
-  reorder it). A merchant without an endpoint gets no events.
+- **Outbox.** `WebhookOutbox.add` runs inside the transaction of the payment or refund change and refuses to run
+  outside one, so an event exists exactly when its change does: no event for a change that rolled back, no change
+  without its event. A refund's event is stored under its payment's id. The body is stored as the exact text that will
+  be signed and sent (`text`, not `jsonb`, which would reorder it). A merchant without an endpoint gets no events.
 - **Dispatcher.** `WebhookDispatcher` runs every `dispatch-interval`, claims due events with the same
   `SKIP LOCKED` lease as the checker, and sends each one with `WebhookSender`. The lease is long enough for the whole
   batch to time out, so another instance doesn't send them meanwhile; an instance that dies mid-send leaves its
@@ -214,11 +256,42 @@ order can't set a payment back.
    provider must send the browser back to the `returnUrl` of the `ChargeRequest`. Decline codes are the gateway's, as
    in the API contract.
 3. A lookup gets the payment's id, the provider's own id when the gateway has one, and when the charge was sent.
-4. A provider's webhook, if it has them, checks the provider's signature and calls `ChargeNotifications`.
-5. Test the failure modes with WireMock, as `AcquirerSimConnectorTest` and `MonobankConnectorTest` do.
+4. A provider's webhook, if it has them, checks the provider's signature and calls `ChargeNotifications`, and
+   `RefundNotifications` when it is about refunds.
+5. `refund` and `lookupRefund` map to `ProviderRefundResult` by the same rules: `FAILED` only when no money went
+   back, `UNKNOWN` when in doubt. The refund's id goes to the provider as its reference, so a lookup can find it
+   without anything the answer brought.
+6. Test the failure modes with WireMock, as `AcquirerSimConnectorTest`, `AcquirerSimRefundTest`,
+   `MonobankConnectorTest` and `MonobankRefundTest` do.
 
 `ProviderConnectors` holds every connector by name, and those of `gateway.providers.order` in that order; a payment is
 always looked up with the provider that charged it, so changing the order leaves payments in flight with their own.
+
+## Observability
+
+- **Metrics.** Each app has Micrometer with the Prometheus registry; Prometheus scrapes `/actuator/prometheus`
+  every 5 s, one job per compose service, so acquirer-sim and monobank-sim, one app in two containers, stay apart.
+  `PaymentMetrics` counts a payment or refund where its outcome is stored, after the guarded update, so each one
+  counts once whoever settled it; `RiskCheck` counts risk-service's answers, `WebhookDispatcher` each delivery's
+  outcome, risk-service its decisions by rule. The circuit breakers are published by Resilience4j's
+  `TaggedCircuitBreakerMetricsPublisher`, for the providers and for risk-service. Labels take only short, fixed
+  lists of values (statuses, provider names, the gateway's codes), never ids, so the series stay few.
+- **Latencies.** Spring times HTTP requests in and out (`RestClient` from the auto-configured builder, which every
+  connector and the webhook sender use) and the gRPC calls, and the gateway keeps them as histograms, so Grafana
+  can show percentiles across instances.
+- **Traces.** Micrometer Tracing with the OpenTelemetry bridge (`spring-boot-starter-opentelemetry`). The trace
+  context travels in W3C `traceparent`: through the same `RestClient` builder, and through gRPC by the global
+  client and server interceptors Spring Boot registers. Each app sends its spans over OTLP/HTTP to Jaeger, and only
+  when `MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT` is set, so tests export nothing. Sampling is 1.0,
+  as a demo can afford. Work the schedulers start (the checkers, the webhook dispatcher) begins traces of its own,
+  so a webhook's trace starts at the dispatcher, not at the payment that caused it.
+- **Logs.** Each line carries `[traceId-spanId]` while a trace is open, so a payment's lines in the gateway and
+  risk-service can be found by one id.
+- **Grafana** is provisioned from files: Prometheus as its data source, and the dashboard, read-only (a changed
+  copy is saved under another name). Anonymous visitors may look, as a demo on localhost can allow.
+
+In compose the actuator answers on the API port, as health already did; a deployment would move it to a management
+port (`management.server.port`) that only Prometheus reaches.
 
 ## Decisions
 
@@ -256,6 +329,17 @@ always looked up with the provider that charged it, so changing the order leaves
   starts a lookup instead of being taken as the outcome: the provider's answer is the one fact, whatever arrives
   late, twice or out of order.
 - **422 for a reused Idempotency-Key**, as the IETF Idempotency-Key draft says: retrying won't help, unlike a 409.
+- **409 for a refund the payment can't take.** `PAYMENT_NOT_REFUNDABLE` and `REFUND_AMOUNT_TOO_LARGE` are about the
+  payment as it is now: a payment still `PROCESSING` may succeed, and a refund that fails frees its amount.
+- **The payment's row lock orders its refunds.** The check that a refund fits and its insert must not interleave
+  with another refund's; a lock on the payment orders them without touching other payments, and without the
+  retries serializable transactions would need.
+- **Refunds go only to the provider that charged, without a circuit breaker.** Money can only go back the way it
+  came, so there is no next provider for an open circuit to send a refund to; it could only fail it. A refund that
+  failed because its provider was down frees its amount and can be asked for again.
+- **Metrics pulled, traces pushed.** Prometheus scraping is how Spring apps are usually watched and needs nothing
+  in the apps but an endpoint; traces go out over OTLP, so the tracing backend can change without the apps
+  changing.
 - **One clock.** All timestamps come from the `Clock` bean, truncated to microseconds like PostgreSQL's, so a
   payment returned right away equals the one read back later.
 
@@ -276,23 +360,28 @@ always looked up with the provider that charged it, so changing the order leaves
 | `GATEWAY_RISK_WHEN_UNAVAILABLE`                 | allow                   | allow or decline a payment risk-service can't check        |
 | `gateway.risk.deadline`, `gateway.risk.open-for` | 300ms, 30s             | how long an answer may take; how long a failing risk-service is left alone |
 | `RISK_SERVICE_PORT`                             | 9090                    | risk-service's gRPC port                                   |
+| `RISK_SERVICE_HTTP_PORT`                        | 8094                    | risk-service's HTTP port, for health and metrics           |
 | `risk.velocity.max-payments`, `.window`         | 10, 10m                 | risk-service: the payments one card may make in the window |
 | `risk.amount-limits`                            | UAH 10000000, USD and EUR 300000 | risk-service: the most one payment may be, in minor units |
 | `risk.blocked-bins`                             | 400009                  | risk-service: the card ranges it declines                  |
 | `GATEWAY_MONOBANK_TOKEN`                        | empty: not configured   | the merchant's monobank token (X-Token); a test token works |
 | `GATEWAY_MONOBANK_WEBHOOK_URL`                  | empty: no webhooks      | this gateway's `/providers/monobank/webhooks`, as monobank reaches it |
 | `MONOBANK_URL`                                  | https://api.monobank.ua | where monobank's API is                                    |
-| `gateway.payments.first-check-after`            | 30s                     | the first lookup of a payment left `PROCESSING`            |
-| `gateway.payments.check-interval`               | 10s                     | how often the checker runs                                 |
+| `gateway.payments.first-check-after`            | 30s                     | the first lookup of a payment or refund left `PROCESSING`  |
+| `gateway.payments.check-interval`               | 10s                     | how often the checkers run                                 |
 | `gateway.payments.challenge-check-interval`     | 1m                      | how often a payment waiting for its challenge is looked up |
-| `gateway.payments.give-up-after`                | 10m                     | when a charge the provider has no record of fails          |
+| `gateway.payments.give-up-after`                | 10m                     | when a charge or refund the provider has no record of fails |
 | `gateway.providers.acquirer-sim.read-timeout`   | 5s                      | longer than the connect timeout, by a startup check        |
 | `gateway.providers.monobank.read-timeout`       | 10s                     | the same for monobank                                      |
 | `gateway.webhooks.dispatch-interval`            | 1s                      | how often the outbox is looked at                          |
 | `gateway.webhooks.read-timeout`                 | 15s                     | how long a merchant's endpoint has to answer               |
 | `gateway.webhooks.retry-delays`                 | 5s, 5m, 30m, 2h, 5h, 10h | the waits before each retry; then the event is given up   |
 | `SIM_PUBLIC_URL`, `sim.challenge-ttl`           | localhost:8091, 15m     | acquirer-sim as browsers reach it; how long a challenge lasts |
+| `sim.refund-delay`                              | 2s                      | how long acquirer-sim's monobank-style refunds stay processing |
 | `MERCHANT_SIM_WEBHOOK_SECRET`                   | none: required          | merchant-sim's copy of the demo merchant's webhook secret  |
 | `MERCHANT_SIM_FAIL_FIRST`                       | 0                       | deliveries of each webhook merchant-sim answers 503 first  |
+| `MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT` | empty: none sent | where every app sends its traces; compose: Jaeger's `/v1/traces` |
+| `management.tracing.sampling.probability`       | 1.0                     | the share of requests traced                               |
+| `GRAFANA_PORT`, `PROMETHEUS_PORT`, `JAEGER_PORT` | 3000, 9090, 16686      | compose: the host ports of the three                       |
 
 Every settings record checks its values at startup and names the setting that is wrong.

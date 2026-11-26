@@ -1,0 +1,11 @@
+# The dashboards in /var/lib/grafana/dashboards (observability/grafana/dashboards), read-only in Grafana.
+apiVersion: 1
+
+providers:
+  - name: payment-gateway
+    folder: payment-gateway
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

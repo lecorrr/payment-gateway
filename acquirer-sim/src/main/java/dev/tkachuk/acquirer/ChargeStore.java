@@ -19,12 +19,14 @@ class ChargeStore {
 
     /**
      * requestHash: a SHA-256 of what was charged, to tell a repeat of the request from a different one. returnUrl
-     * and challengeExpiresAt belong to a charge that got a 3-D Secure challenge; for others they are null.
+     * and challengeExpiresAt belong to a charge that got a 3-D Secure challenge; for others they are null. refunds
+     * is how its refunds will go, decided by its card, which is not kept.
      */
-    record StoredCharge(Charge charge, String requestHash, String returnUrl, Instant challengeExpiresAt) {
+    record StoredCharge(Charge charge, String requestHash, String returnUrl, Instant challengeExpiresAt,
+            Issuer.RefundBehaviour refunds) {
 
         StoredCharge with(Charge changed) {
-            return new StoredCharge(changed, requestHash, returnUrl, challengeExpiresAt);
+            return new StoredCharge(changed, requestHash, returnUrl, challengeExpiresAt, refunds);
         }
     }
 

@@ -2,6 +2,7 @@ package dev.tkachuk.gateway.provider.monobank;
 
 import dev.tkachuk.gateway.provider.ChargeNotifications;
 import dev.tkachuk.gateway.provider.ProviderHttp;
+import dev.tkachuk.gateway.provider.RefundNotifications;
 import java.util.UUID;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -17,8 +18,9 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Where monobank reports invoice changes, once gateway.providers.monobank.webhook-url points here. Only a body
- * monobank signed counts, and even that is only a reason to ask: the payment is looked up with monobank again.
+ * Where monobank reports invoice changes, once gateway.providers.monobank.webhook-url points here: a payment's
+ * outcome, and its refunds in cancelList. Only a body monobank signed counts, and even that is only a reason to ask:
+ * the payment, and each of its refunds still PROCESSING, is looked up with monobank again.
  * monobank sends a webhook again, up to three times, until it gets 200, so a signed report the gateway can't use
  * gets 200 too; there is nothing a resend would change.
  */
@@ -31,14 +33,16 @@ class MonobankWebhookController {
 
     private final MonobankProperties properties;
     private final MonobankPublicKey publicKey;
-    private final ChargeNotifications notifications;
+    private final ChargeNotifications charges;
+    private final RefundNotifications refunds;
     private final JsonMapper jsonMapper;
 
     MonobankWebhookController(MonobankProperties properties, MonobankPublicKey publicKey,
-            ChargeNotifications notifications, JsonMapper jsonMapper) {
+            ChargeNotifications charges, RefundNotifications refunds, JsonMapper jsonMapper) {
         this.properties = properties;
         this.publicKey = publicKey;
-        this.notifications = notifications;
+        this.charges = charges;
+        this.refunds = refunds;
         this.jsonMapper = jsonMapper;
     }
 
@@ -83,7 +87,9 @@ class MonobankWebhookController {
             return ResponseEntity.ok().build();
         }
         log.info("monobank reports invoice {} of payment {} is {}", invoice.invoiceId(), paymentId, invoice.status());
-        notifications.chargeChanged(MonobankConnector.NAME, paymentId);
+        // The same webhook reports the payment and its refunds; each side asks only if it is still waiting.
+        charges.chargeChanged(MonobankConnector.NAME, paymentId);
+        refunds.refundsChanged(MonobankConnector.NAME, paymentId);
         return ResponseEntity.ok().build();
     }
 

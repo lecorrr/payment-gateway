@@ -54,4 +54,15 @@ final class FakeConnector implements ProviderConnector {
     public ProviderResult lookup(ChargeLookup lookup) {
         throw new UnsupportedOperationException();
     }
+
+    // The router never sends refunds: they go to the provider that charged the payment.
+    @Override
+    public ProviderRefundResult refund(RefundRequest request) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ProviderRefundResult lookupRefund(RefundLookup lookup) {
+        throw new UnsupportedOperationException();
+    }
 }

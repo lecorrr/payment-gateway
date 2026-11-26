@@ -60,6 +60,7 @@ final class PaymentMapper {
                 .provider(payment.provider())
                 .providerReference(payment.providerReference())
                 .declineCode(payment.declineCode())
+                .refundedAmount(payment.refundedAmount())
                 .createdAt(payment.createdAt().atOffset(ZoneOffset.UTC))
                 .updatedAt(payment.updatedAt().atOffset(ZoneOffset.UTC));
     }

@@ -11,6 +11,7 @@ import dev.tkachuk.gateway.common.Currency;
 import dev.tkachuk.gateway.provider.ProvidersProperties.CircuitSettings;
 import dev.tkachuk.gateway.support.MovableClock;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
@@ -202,8 +203,8 @@ class ProviderRouterTest {
         List<String> order = Arrays.stream(connectors).map(FakeConnector::name).toList();
         ProvidersProperties properties = new ProvidersProperties(order, new CircuitSettings(4, 2, 50, OPEN_FOR, 1));
         ProviderConnectors providers = new ProviderConnectors(List.of(connectors), properties);
-        CircuitBreakerRegistry circuitBreakers =
-                new ProviderCircuitsConfiguration().providerCircuitBreakers(properties, clock);
+        CircuitBreakerRegistry circuitBreakers = new ProviderCircuitsConfiguration()
+                .providerCircuitBreakers(properties, clock, new SimpleMeterRegistry());
         return new ProviderRouter(providers, circuitBreakers, shared, properties);
     }
 

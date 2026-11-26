@@ -6,6 +6,8 @@ import dev.tkachuk.risk.api.Decision;
 import dev.tkachuk.risk.api.RiskServiceGrpc;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.grpc.server.service.GrpcService;
@@ -13,16 +15,21 @@ import org.springframework.grpc.server.service.GrpcService;
 /**
  * The RiskService of risk.proto. A request that is not a payment the rules can judge is refused with
  * INVALID_ARGUMENT, naming the field; the gateway then goes by its own setting for when risk-service can't answer.
+ * risk.assessments counts the decisions, a decline by the rule that made it.
  */
 @GrpcService
 class RiskGrpcService extends RiskServiceGrpc.RiskServiceImplBase {
 
     private static final Logger log = LoggerFactory.getLogger(RiskGrpcService.class);
 
-    private final RiskRules rules;
+    static final String ASSESSMENTS = "risk.assessments";
 
-    RiskGrpcService(RiskRules rules) {
+    private final RiskRules rules;
+    private final MeterRegistry meters;
+
+    RiskGrpcService(RiskRules rules, MeterRegistry meters) {
         this.rules = rules;
+        this.meters = meters;
     }
 
     @Override
@@ -47,7 +54,18 @@ class RiskGrpcService extends RiskServiceGrpc.RiskServiceImplBase {
                     assessment.reason());
             response.setDecision(Decision.DECISION_DECLINE).setReason(assessment.reason());
         }
+        count(assessment);
         responseObserver.onNext(response.build());
         responseObserver.onCompleted();
+    }
+
+    // The reasons are the rules' three codes, so the series stay few.
+    private void count(Assessment assessment) {
+        Counter.builder(ASSESSMENTS)
+                .description("Payments assessed, by decision and, for a decline, the rule that made it")
+                .tag("decision", assessment.allowed() ? "allow" : "decline")
+                .tag("reason", assessment.reason() == null ? "none" : assessment.reason())
+                .register(meters)
+                .increment();
     }
 }

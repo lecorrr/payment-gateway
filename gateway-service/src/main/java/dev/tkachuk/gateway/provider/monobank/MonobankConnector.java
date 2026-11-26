@@ -8,7 +8,10 @@ import dev.tkachuk.gateway.provider.ChargeLookup;
 import dev.tkachuk.gateway.provider.ChargeRequest;
 import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderConnector;
+import dev.tkachuk.gateway.provider.ProviderRefundResult;
 import dev.tkachuk.gateway.provider.ProviderResult;
+import dev.tkachuk.gateway.provider.RefundLookup;
+import dev.tkachuk.gateway.provider.RefundRequest;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -28,7 +31,7 @@ import org.springframework.web.client.RestClientException;
  * PENDING; failures come with monobank's errCode, turned into the gateway's decline codes. As with every connector,
  * "not charged" is told from "don't know": a 4xx or a connection that never opened is FAILED, while a 5xx, a read
  * timeout or an unreadable answer is UNKNOWN. When the answer to a charge was lost, the gateway has no invoice id,
- * so a lookup first finds the invoice by its reference in monobank's statement.
+ * so a lookup first finds the invoice by its reference in monobank's statement. Refunds go through invoice/cancel.
  */
 @Component
 class MonobankConnector implements ProviderConnector {
@@ -112,6 +115,78 @@ class MonobankConnector implements ProviderConnector {
                 .orElseGet(ProviderResult::notFound);
     }
 
+    /**
+     * Refunds through invoice/cancel, with the refund's id as extRef. monobank usually answers "processing" and
+     * finishes the refund later, telling by webhook; the invoice's cancelList shows each refund by its extRef.
+     */
+    @Override
+    public ProviderRefundResult refund(RefundRequest request) {
+        UUID reference = request.reference();
+        try {
+            MonobankClient.CancelAnswer answer = client.cancel(CancelRequest.from(request));
+            return refundResultOf(answer == null ? null : answer.status(), reference);
+        } catch (HttpClientErrorException.TooManyRequests e) {
+            log.warn("monobank turned refund {} away: HTTP 429, too many requests", reference);
+            return ProviderRefundResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
+        } catch (HttpClientErrorException e) {
+            log.warn("monobank refused refund {}: HTTP {}", reference, e.getStatusCode().value());
+            return ProviderRefundResult.failed(FailureCodes.PROVIDER_REJECTED_REQUEST);
+        } catch (HttpServerErrorException e) {
+            log.warn("monobank failed on refund {}: HTTP {}; the money may be on its way back", reference,
+                    e.getStatusCode().value());
+            return ProviderRefundResult.unknown();
+        } catch (ResourceAccessException e) {
+            if (neverConnected(e)) {
+                log.warn("monobank is unreachable, so refund {} was not sent: {}", reference, describe(e));
+                return ProviderRefundResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
+            }
+            log.warn("No answer from monobank for refund {}: {}", reference, describe(e));
+            return ProviderRefundResult.unknown();
+        } catch (RestClientException e) {
+            log.warn("monobank's answer for refund {} could not be read: {}", reference, describe(e));
+            return ProviderRefundResult.unknown();
+        }
+    }
+
+    /** A refund is found in its invoice's cancelList; an invoice that lists no such extRef never got it. */
+    @Override
+    public ProviderRefundResult lookupRefund(RefundLookup lookup) {
+        UUID reference = lookup.reference();
+        Invoice invoice;
+        try {
+            invoice = client.invoice(lookup.chargeReference());
+        } catch (HttpClientErrorException.NotFound e) {
+            return ProviderRefundResult.notFound();
+        } catch (RestClientException e) {
+            log.warn("Could not ask monobank about refund {}: {}", reference, describe(e));
+            return ProviderRefundResult.unknown();
+        }
+        if (invoice == null || invoice.invoiceId() == null) {
+            log.warn("monobank answered for refund {} without an invoice", reference);
+            return ProviderRefundResult.unknown();
+        }
+        return invoice.cancelOf(CancelRequest.extRefOf(reference))
+                .map(cancel -> refundResultOf(cancel.status(), reference))
+                .orElseGet(ProviderRefundResult::notFound);
+    }
+
+    private static ProviderRefundResult refundResultOf(@Nullable String status, UUID reference) {
+        if (status == null) {
+            log.warn("monobank answered for refund {} without a status", reference);
+            return ProviderRefundResult.unknown();
+        }
+        return switch (status) {
+            case "success" -> ProviderRefundResult.succeeded(null);
+            case "processing" -> ProviderRefundResult.pending(null);
+            case "failure" -> ProviderRefundResult.failed(FailureCodes.REFUND_DECLINED);
+            default -> {
+                log.warn("monobank answered for refund {} with status {}, which the gateway does not know",
+                        reference, status);
+                yield ProviderRefundResult.unknown();
+            }
+        };
+    }
+
     // payment-direct gives the reason for a failure in words only (failureReason); the invoice's status has the code.
     @Nullable
     private Invoice withErrCode(@Nullable Invoice invoice) {
@@ -152,7 +227,8 @@ class MonobankConnector implements ProviderConnector {
             case "expired" -> ProviderResult.declined(invoiceId, "authentication_expired");
             case "created", "processing" -> challengeOrPending(invoice, invoiceId, reference);
             default -> {
-                // hold and reversed can't follow a debit the gateway made: someone has to look at the invoice.
+                // hold can't follow a debit the gateway made, and reversed only follows a refund of a payment that
+                // succeeded already, which is never looked up: someone has to look at the invoice.
                 log.warn("monobank answered for payment {} with status {}, which the gateway does not act on",
                         reference, invoice.status());
                 yield ProviderResult.pending(invoiceId);

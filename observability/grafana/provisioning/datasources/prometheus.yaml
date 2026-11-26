@@ -1,0 +1,13 @@
+# Prometheus of compose.yaml, the data source of the payment-gateway dashboard. Traces are in Jaeger's own UI.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s

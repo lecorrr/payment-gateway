@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import dev.tkachuk.gateway.common.Currency;
 import java.net.URI;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -115,5 +116,16 @@ class RequestFingerprintsTest {
                 Duration.ofSeconds(10), Duration.ofMinutes(1), Duration.ofMinutes(10), 20));
 
         assertThat(otherKey.cardToken(card().number())).isNotEqualTo(fingerprints.cardToken(card().number()));
+    }
+
+    @Test
+    void shouldTellRefundRequestsApartByPaymentAndAmount() {
+        UUID paymentId = UUID.fromString("7f1c2b3a-0000-4000-8000-000000000001");
+        String fingerprint = fingerprints.ofRefund(paymentId, 5000);
+
+        assertThat(fingerprints.ofRefund(paymentId, 5000)).isEqualTo(fingerprint).hasSize(64);
+        assertThat(fingerprints.ofRefund(paymentId, 5001)).isNotEqualTo(fingerprint);
+        assertThat(fingerprints.ofRefund(UUID.randomUUID(), 5000)).isNotEqualTo(fingerprint);
+        assertThat(fingerprint).isNotEqualTo(fingerprints.of(request()));
     }
 }

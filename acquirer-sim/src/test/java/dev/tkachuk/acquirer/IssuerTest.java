@@ -51,4 +51,14 @@ class IssuerTest {
     private static ChargeRequest.Card card(String number, int expMonth, int expYear, String cvc) {
         return new ChargeRequest.Card(number, expMonth, expYear, cvc, null);
     }
+
+    @ParameterizedTest
+    @CsvSource({
+            Issuer.REFUND_DECLINED_CARD + ", DECLINED",
+            Issuer.SLOW_CARD + ", SLOW",
+            "4111111111111111, NORMAL"})
+    void shouldDecideRefundsByCard(String number, Issuer.RefundBehaviour behaviour) {
+        assertThat(Issuer.refundBehaviour(card(number, 12, 2030, "123"))).isEqualTo(behaviour);
+        assertThat(Issuer.declineCode(card(number, 12, 2030, "123"), TODAY)).isEmpty();
+    }
 }

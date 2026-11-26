@@ -9,5 +9,6 @@ WORKDIR /app
 COPY target/risk-service.jar /app/risk-service.jar
 USER 10001:10001
 
-EXPOSE 9090
+# gRPC, and HTTP for the actuator.
+EXPOSE 9090 8094
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=60", "-jar", "/app/risk-service.jar"]

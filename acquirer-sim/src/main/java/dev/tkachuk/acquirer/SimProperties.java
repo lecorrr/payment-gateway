@@ -10,11 +10,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param publicUrl    acquirer-sim as browsers reach it, for the link to a 3-D Secure challenge page
  * @param slowDelay    how long the slow test card waits before answering
  * @param challengeTtl how long a 3-D Secure challenge stays open; after that its charge is declined
- * @param maxCharges   charges kept in memory; the oldest are forgotten beyond this
+ * @param maxCharges   charges kept in memory, and refunds; the oldest are forgotten beyond this
+ * @param refundDelay  how long a refund sent the monobank way stays "processing" before it is finished
  */
 @ConfigurationProperties("sim")
 public record SimProperties(String apiKey, String publicUrl, Duration slowDelay, Duration challengeTtl,
-        int maxCharges) {
+        int maxCharges, Duration refundDelay) {
 
     static final int MIN_API_KEY_LENGTH = 16;
 
@@ -37,11 +38,14 @@ public record SimProperties(String apiKey, String publicUrl, Duration slowDelay,
         if (maxCharges < 1) {
             throw new IllegalArgumentException("sim.max-charges must be at least 1, got " + maxCharges);
         }
+        if (refundDelay == null || refundDelay.isNegative()) {
+            throw new IllegalArgumentException("sim.refund-delay must not be negative, got " + refundDelay);
+        }
     }
 
     @Override
     public String toString() {
         return "SimProperties[apiKey=***, publicUrl=" + publicUrl + ", slowDelay=" + slowDelay + ", challengeTtl="
-                + challengeTtl + ", maxCharges=" + maxCharges + "]";
+                + challengeTtl + ", maxCharges=" + maxCharges + ", refundDelay=" + refundDelay + "]";
     }
 }

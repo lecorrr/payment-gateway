@@ -39,4 +39,11 @@ final class SignedWebhooks {
                  "data": {"id": "%s", "orderId": "ORDER-1001", "amount": 15000, "currency": "UAH", "status": "%s"}}"""
                 .formatted(type, changedAt, paymentId, status);
     }
+
+    static String refundEvent(String type, String refundId, String paymentId, String status, String changedAt) {
+        return """
+                {"type": "%s", "timestamp": "%s",
+                 "data": {"id": "%s", "paymentId": "%s", "amount": 5000, "currency": "UAH", "status": "%s"}}"""
+                .formatted(type, changedAt, refundId, paymentId, status);
+    }
 }

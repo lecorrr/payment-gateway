@@ -20,6 +20,22 @@ final class Issuer {
     /** The challenge was left open past sim.challenge-ttl. */
     static final String AUTHENTICATION_EXPIRED = "authentication_expired";
 
+    /** Approved, but every refund of it is declined, as for a card whose account was closed since. */
+    static final String REFUND_DECLINED_CARD = "4000000000005126";
+
+    /** The code a declined refund comes with. */
+    static final String REFUND_DECLINED = "refund_declined";
+
+    /** How the refunds of a charge go, decided by its card when it is charged. */
+    enum RefundBehaviour {
+        /** Refunded at once. */
+        NORMAL,
+        /** Declined with refund_declined. */
+        DECLINED,
+        /** Refunded, but the answer comes after sim.slow-delay, as the slow card's charge does. */
+        SLOW
+    }
+
     private static final Map<String, String> DECLINED_CARDS = Map.of(
             "4000000000000002", "do_not_honor",
             "4000000000009995", "insufficient_funds",
@@ -37,6 +53,14 @@ final class Issuer {
             return Optional.of("incorrect_cvc");
         }
         return Optional.ofNullable(DECLINED_CARDS.get(card.number()));
+    }
+
+    static RefundBehaviour refundBehaviour(ChargeRequest.Card card) {
+        return switch (card.number()) {
+            case REFUND_DECLINED_CARD -> RefundBehaviour.DECLINED;
+            case SLOW_CARD -> RefundBehaviour.SLOW;
+            default -> RefundBehaviour.NORMAL;
+        };
     }
 
     /** Whether the cardholder has to pass a challenge first; a card declined outright never gets one. */

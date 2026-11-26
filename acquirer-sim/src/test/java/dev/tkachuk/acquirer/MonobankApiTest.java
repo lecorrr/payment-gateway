@@ -1,6 +1,7 @@
 package dev.tkachuk.acquirer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -16,6 +17,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.Signature;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.UUID;
@@ -35,12 +37,14 @@ import org.springframework.test.web.servlet.ResultActions;
 
 /** The monobank-style API as the gateway's monobank connector uses it, webhooks included. */
 // The same settings as ChargeApiTest, so both share one application context.
-@SpringBootTest(properties = {"sim.api-key=" + ChargeApiTest.API_KEY, "sim.slow-delay=300ms"})
+@SpringBootTest(properties = {"sim.api-key=" + ChargeApiTest.API_KEY, "sim.slow-delay=300ms",
+        "sim.refund-delay=300ms"})
 @AutoConfigureMockMvc
 class MonobankApiTest {
 
     private static final String PAYMENT_DIRECT = "/api/merchant/invoice/payment-direct";
     private static final String STATUS = "/api/merchant/invoice/status";
+    private static final String CANCEL = "/api/merchant/invoice/cancel";
     private static final String VISA = "4111111111111111";
 
     @Autowired
@@ -199,6 +203,93 @@ class MonobankApiTest {
             assertThat((String) JsonPath.read(body, "$.errCode")).isEqualTo("1054");
             assertThat(signedByKeys(webhook)).isTrue();
         }
+    }
+
+    @Test
+    void shouldRefundInvoiceInPartAndListItInCancelList() throws Exception {
+        String invoiceId = invoiceIdOf(payDirect(newReference(), VISA, "123", null));
+
+        cancel("{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\", \"amount\": 5000}".formatted(invoiceId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("processing"))
+                .andExpect(jsonPath("$.createdDate").isString());
+        invoiceStatus(invoiceId)
+                .andExpect(jsonPath("$.cancelList[0].status").value("processing"))
+                .andExpect(jsonPath("$.cancelList[0].extRef").value("refund-1"))
+                .andExpect(jsonPath("$.cancelList[0].amount").value(5000))
+                .andExpect(jsonPath("$.finalAmount").value(15000));
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> invoiceStatus(invoiceId)
+                .andExpect(jsonPath("$.cancelList[0].status").value("success")));
+        invoiceStatus(invoiceId)
+                .andExpect(jsonPath("$.status").value("success"))
+                .andExpect(jsonPath("$.finalAmount").value(10000));
+    }
+
+    @Test
+    void shouldReverseInvoiceRefundedInFull() throws Exception {
+        String invoiceId = invoiceIdOf(payDirect(newReference(), VISA, "123", null));
+
+        cancel("{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\"}".formatted(invoiceId))
+                .andExpect(status().isOk());
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> invoiceStatus(invoiceId)
+                .andExpect(jsonPath("$.status").value("reversed"))
+                .andExpect(jsonPath("$.finalAmount").value(0))
+                .andExpect(jsonPath("$.cancelList[0].amount").value(15000)));
+        cancel("{\"invoiceId\": \"%s\"}".formatted(invoiceId))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void shouldAnswerRepeatedCancelWithSameRefund() throws Exception {
+        String invoiceId = invoiceIdOf(payDirect(newReference(), VISA, "123", null));
+        String body = "{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\", \"amount\": 5000}".formatted(invoiceId);
+        cancel(body).andExpect(status().isOk());
+
+        cancel(body).andExpect(status().isOk());
+        cancel(body.replace("5000", "6000")).andExpect(status().isBadRequest());
+
+        invoiceStatus(invoiceId).andExpect(jsonPath("$.cancelList.length()").value(1));
+    }
+
+    @Test
+    void shouldRefuseCancelThatCanNotBeDone() throws Exception {
+        String invoiceId = invoiceIdOf(payDirect(newReference(), VISA, "123", null));
+        String declined = invoiceIdOf(payDirect(newReference(), "4000000000000002", "123", null));
+
+        cancel("{\"invoiceId\": \"%s\", \"amount\": 15001}".formatted(invoiceId))
+                .andExpect(status().isBadRequest());
+        cancel("{\"invoiceId\": \"%s\", \"amount\": 100}".formatted(declined))
+                .andExpect(status().isBadRequest());
+        cancel("{\"invoiceId\": \"ch_unknown\", \"amount\": 100}")
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void shouldSendWebhookOnceRefundIsFinished() throws Exception {
+        try (WebhookReceiver receiver = WebhookReceiver.start()) {
+            String invoiceId = invoiceIdOf(payDirect(newReference(), Issuer.REFUND_DECLINED_CARD, "123",
+                    receiver.url()));
+            receiver.next();
+
+            cancel("{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\", \"amount\": 5000}".formatted(invoiceId))
+                    .andExpect(jsonPath("$.status").value("processing"));
+
+            Received webhook = receiver.next();
+            String body = new String(webhook.body(), StandardCharsets.UTF_8);
+            assertThat((String) JsonPath.read(body, "$.invoiceId")).isEqualTo(invoiceId);
+            assertThat((String) JsonPath.read(body, "$.cancelList[0].status")).isEqualTo("failure");
+            assertThat((String) JsonPath.read(body, "$.cancelList[0].extRef")).isEqualTo("refund-1");
+            assertThat(signedByKeys(webhook)).isTrue();
+        }
+    }
+
+    private ResultActions cancel(String body) throws Exception {
+        return mockMvc.perform(post(CANCEL)
+                .header(MonobankTokenFilter.HEADER, ChargeApiTest.API_KEY)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body));
     }
 
     private ResultActions payDirect(String reference, String pan, String cvv, String webHookUrl) throws Exception {

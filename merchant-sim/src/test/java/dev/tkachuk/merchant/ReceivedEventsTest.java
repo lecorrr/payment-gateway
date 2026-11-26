@@ -17,9 +17,9 @@ class ReceivedEventsTest {
     @Test
     void shouldTakeWebhookOnceHoweverOftenItComes() {
         assertThat(events.countDelivery("evt-1")).isEqualTo(1);
-        assertThat(events.take("evt-1", "payment.succeeded", PAYMENT, "SUCCEEDED", NOW, NOW)).isTrue();
+        assertThat(events.take("evt-1", "payment.succeeded", PAYMENT, null, "SUCCEEDED", NOW, NOW)).isTrue();
         assertThat(events.countDelivery("evt-1")).isEqualTo(2);
-        assertThat(events.take("evt-1", "payment.succeeded", PAYMENT, "SUCCEEDED", NOW, NOW.plusSeconds(1)))
+        assertThat(events.take("evt-1", "payment.succeeded", PAYMENT, null, "SUCCEEDED", NOW, NOW.plusSeconds(1)))
                 .isFalse();
 
         assertThat(events.all()).singleElement().satisfies(event -> {
@@ -32,12 +32,24 @@ class ReceivedEventsTest {
     @Test
     void shouldGoByWhenPaymentChangedNotWhenWebhookCame() {
         events.countDelivery("evt-2");
-        events.take("evt-2", "payment.succeeded", PAYMENT, "SUCCEEDED", NOW.plusSeconds(5), NOW);
+        events.take("evt-2", "payment.succeeded", PAYMENT, null, "SUCCEEDED", NOW.plusSeconds(5), NOW);
         events.countDelivery("evt-1");
-        events.take("evt-1", "payment.requires_action", PAYMENT, "REQUIRES_ACTION", NOW, NOW.plusSeconds(1));
+        events.take("evt-1", "payment.requires_action", PAYMENT, null, "REQUIRES_ACTION", NOW, NOW.plusSeconds(1));
 
         assertThat(events.statusOf(PAYMENT)).contains("SUCCEEDED");
         assertThat(events.statusOf("another-payment")).isEmpty();
+    }
+
+    // A refund that failed later leaves the payment SUCCEEDED: its event is about the refund.
+    @Test
+    void shouldKeepRefundsEventsOutOfPaymentsStatus() {
+        events.countDelivery("evt-1");
+        events.take("evt-1", "payment.succeeded", PAYMENT, null, "SUCCEEDED", NOW, NOW);
+        events.countDelivery("evt-2");
+        events.take("evt-2", "refund.failed", PAYMENT, "refund-1", "FAILED", NOW.plusSeconds(5), NOW);
+
+        assertThat(events.statusOf(PAYMENT)).contains("SUCCEEDED");
+        assertThat(events.all().getFirst().refundId()).isEqualTo("refund-1");
     }
 
     @Test

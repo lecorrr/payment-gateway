@@ -9,7 +9,10 @@ import dev.tkachuk.gateway.provider.ChargeRequest;
 import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderConnector;
 import dev.tkachuk.gateway.provider.ProviderHttp;
+import dev.tkachuk.gateway.provider.ProviderRefundResult;
 import dev.tkachuk.gateway.provider.ProviderResult;
+import dev.tkachuk.gateway.provider.RefundLookup;
+import dev.tkachuk.gateway.provider.RefundRequest;
 import java.util.UUID;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -29,7 +32,7 @@ import org.springframework.web.client.RestClientException;
  * unreadable answer is UNKNOWN, and the payment waits for a lookup. A connection that never opened and a 429 are the
  * provider being unavailable, which lets another provider take the charge. "requires_action" is a 3-D Secure
  * challenge, passed on with the challenge's URL. Charges are looked up by the payment's id, which acquirer-sim keeps
- * as their reference.
+ * as their reference, and refunds by the refund's id in the same way.
  */
 @Component
 class AcquirerSimConnector implements ProviderConnector {
@@ -102,6 +105,78 @@ class AcquirerSimConnector implements ProviderConnector {
             log.warn("Could not ask acquirer-sim about payment {}: {}", reference, describe(e));
             return ProviderResult.unknown();
         }
+    }
+
+    /**
+     * Refunds with the refund's id as acquirer-sim's reference, so a repeat after a lost answer gets the same refund
+     * back rather than a second one. The same rules as for a charge tell "not refunded" from "don't know".
+     */
+    @Override
+    public ProviderRefundResult refund(RefundRequest request) {
+        UUID reference = request.reference();
+        try {
+            SimRefund refund = restClient.post()
+                    .uri("/v1/refunds")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(SimRefundRequest.from(request))
+                    .retrieve()
+                    .body(SimRefund.class);
+            return refundResultOf(refund, reference);
+        } catch (HttpClientErrorException.TooManyRequests e) {
+            log.warn("acquirer-sim turned refund {} away: HTTP 429, too many requests", reference);
+            return ProviderRefundResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
+        } catch (HttpClientErrorException e) {
+            log.warn("acquirer-sim refused refund {}: HTTP {}", reference, e.getStatusCode().value());
+            return ProviderRefundResult.failed(FailureCodes.PROVIDER_REJECTED_REQUEST);
+        } catch (HttpServerErrorException e) {
+            log.warn("acquirer-sim failed on refund {}: HTTP {}; the money may be on its way back", reference,
+                    e.getStatusCode().value());
+            return ProviderRefundResult.unknown();
+        } catch (ResourceAccessException e) {
+            if (neverConnected(e)) {
+                log.warn("acquirer-sim is unreachable, so refund {} was not sent: {}", reference, describe(e));
+                return ProviderRefundResult.failed(FailureCodes.PROVIDER_UNAVAILABLE);
+            }
+            log.warn("No answer from acquirer-sim for refund {}: {}", reference, describe(e));
+            return ProviderRefundResult.unknown();
+        } catch (RestClientException e) {
+            log.warn("acquirer-sim's answer for refund {} could not be read: {}", reference, describe(e));
+            return ProviderRefundResult.unknown();
+        }
+    }
+
+    @Override
+    public ProviderRefundResult lookupRefund(RefundLookup lookup) {
+        UUID reference = lookup.reference();
+        try {
+            SimRefund refund = restClient.get()
+                    .uri("/v1/refunds?reference={reference}", reference)
+                    .retrieve()
+                    .body(SimRefund.class);
+            return refundResultOf(refund, reference);
+        } catch (HttpClientErrorException.NotFound e) {
+            return ProviderRefundResult.notFound();
+        } catch (RestClientException e) {
+            log.warn("Could not ask acquirer-sim about refund {}: {}", reference, describe(e));
+            return ProviderRefundResult.unknown();
+        }
+    }
+
+    private static ProviderRefundResult refundResultOf(@Nullable SimRefund refund, UUID reference) {
+        if (refund == null || refund.id() == null || refund.status() == null) {
+            log.warn("acquirer-sim answered for refund {} without a refund id or status", reference);
+            return ProviderRefundResult.unknown();
+        }
+        return switch (refund.status()) {
+            case "succeeded" -> ProviderRefundResult.succeeded(refund.id());
+            case "pending" -> ProviderRefundResult.pending(refund.id());
+            case "failed" -> ProviderRefundResult.failed(refund.id(),
+                    refund.failureCode() == null ? FailureCodes.REFUND_DECLINED : refund.failureCode());
+            default -> {
+                log.warn("acquirer-sim answered for refund {} with an unknown status", reference);
+                yield ProviderRefundResult.unknown();
+            }
+        };
     }
 
     private static ProviderResult resultOf(@Nullable SimCharge charge, UUID reference) {

@@ -95,7 +95,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   health:
     redis:
       enabled: false   # Redis is optional (see spring.data.redis), so it doesn't make the gateway unhealthy
@@ -103,6 +103,24 @@ management:
     health:
       probes:
         enabled: true
+  # Metrics are scraped by Prometheus from /actuator/prometheus; the OpenTelemetry starter would also push them over
+  # OTLP, which nothing here receives.
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  metrics:
+    distribution:
+      # Buckets for the latency panels: the API's requests, the calls to providers and to risk-service.
+      percentiles-histogram:
+        http.server.requests: true
+        http.client.requests: true
+        grpc.client: true
+  # Every request is traced; traces are sent only where MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT
+  # points (compose: Jaeger). Without it they stay in this process, and only their ids show in the log.
+  tracing:
+    sampling:
+      probability: 1.0
 
 springdoc:
   swagger-ui:

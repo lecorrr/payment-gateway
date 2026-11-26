@@ -1,6 +1,9 @@
 package dev.tkachuk.gateway.provider;
 
-/** The gateway's own reasons for a FAILED payment; declines carry the provider's codes instead. */
+/**
+ * The gateway's own reasons for a FAILED payment or refund; declines carry the provider's codes instead. For a refund
+ * the first three mean the same as for a payment, with "charge" read as "refund".
+ */
 public final class FailureCodes {
 
     /**
@@ -14,6 +17,9 @@ public final class FailureCodes {
 
     /** The answer to the charge was lost, and the provider still had no record of it when the gateway gave up. */
     public static final String PROVIDER_NO_RECORD = "provider_no_record";
+
+    /** The provider refused the refund without saying why in a code of its own. */
+    public static final String REFUND_DECLINED = "refund_declined";
 
     private FailureCodes() {
     }

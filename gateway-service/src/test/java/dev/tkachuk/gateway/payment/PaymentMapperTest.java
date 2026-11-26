@@ -90,6 +90,7 @@ class PaymentMapperTest {
         assertThat(response.getStatus()).isEqualTo(PaymentStatusDto.DECLINED);
         assertThat(response.getDeclineCode()).isEqualTo("insufficient_funds");
         assertThat(response.getProviderReference()).isEqualTo("ch_1");
+        assertThat(response.getRefundedAmount()).isZero();
         assertThat(response.getNextAction()).isNull();
         assertThat(response.getCard().getBrand()).isEqualTo(CardBrandDto.VISA);
         assertThat(response.getCard().getBin()).isEqualTo("411111");
@@ -137,7 +138,7 @@ class PaymentMapperTest {
     private static Payment payment(PaymentStatus status, String declineCode, String actionUrl) {
         return new Payment(UUID.randomUUID(), UUID.randomUUID(), "key-1", "f".repeat(64), "ORDER-1001", 15000,
                 Currency.UAH, "Two tickets", null, status, CardBrand.VISA, "411111", "1111", "acquirer-sim", "ch_1",
-                declineCode, actionUrl, null, CREATED_AT, CREATED_AT.plusSeconds(1));
+                declineCode, 0, actionUrl, null, CREATED_AT, CREATED_AT.plusSeconds(1));
     }
 
     private static CreatePaymentRequestDto request(String cardNumber) {

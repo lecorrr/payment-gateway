@@ -18,19 +18,24 @@ import org.springframework.stereotype.Component;
 class ReceivedEvents {
 
     /**
-     * changedAt: when the payment changed, from the event itself, which orders events of one payment whatever order
+     * refundId: set for a refund's event, whose status is the refund's; paymentId is always the payment's. changedAt:
+     * when the payment or refund changed, from the event itself, which orders events of one payment whatever order
      * they came in; takenAt: when a delivery was first answered 2xx, which is when the shop acted on it. Until then
      * only webhookId and deliveries are known.
      */
-    record Event(String webhookId, int deliveries, String type, String paymentId, String status, Instant changedAt,
-            Instant takenAt) {
+    record Event(String webhookId, int deliveries, String type, String paymentId, String refundId, String status,
+            Instant changedAt, Instant takenAt) {
 
         Event withOneMoreDelivery() {
-            return new Event(webhookId, deliveries + 1, type, paymentId, status, changedAt, takenAt);
+            return new Event(webhookId, deliveries + 1, type, paymentId, refundId, status, changedAt, takenAt);
         }
 
         boolean isTaken() {
             return takenAt != null;
+        }
+
+        boolean isAboutPayment() {
+            return refundId == null;
         }
     }
 
@@ -50,21 +55,25 @@ class ReceivedEvents {
     synchronized int countDelivery(String webhookId) {
         Event event = byWebhookId.get(webhookId);
         Event counted = event == null
-                ? new Event(webhookId, 1, null, null, null, null, null)
+                ? new Event(webhookId, 1, null, null, null, null, null, null)
                 : event.withOneMoreDelivery();
         byWebhookId.put(webhookId, counted);
         return counted.deliveries();
     }
 
-    /** Records what the webhook says the first time one with this id is taken; returns false for a duplicate. */
-    synchronized boolean take(String webhookId, String type, String paymentId, String status, Instant changedAt,
-            Instant now) {
+    /**
+     * Records what the webhook says the first time one with this id is taken; returns false for a duplicate.
+     * refundId: null for a payment's event.
+     */
+    synchronized boolean take(String webhookId, String type, String paymentId, String refundId, String status,
+            Instant changedAt, Instant now) {
         Event event = byWebhookId.get(webhookId);
         if (event != null && event.isTaken()) {
             return false;
         }
         int deliveries = event == null ? 1 : event.deliveries();
-        byWebhookId.put(webhookId, new Event(webhookId, deliveries, type, paymentId, status, changedAt, now));
+        byWebhookId.put(webhookId, new Event(webhookId, deliveries, type, paymentId, refundId, status, changedAt,
+                now));
         return true;
     }
 
@@ -75,10 +84,13 @@ class ReceivedEvents {
         return events;
     }
 
-    /** The payment's status as its most recent change reported it, whatever order the webhooks came in. */
+    /**
+     * The payment's status as its most recent change reported it, whatever order the webhooks came in; its refunds'
+     * events don't count.
+     */
     synchronized Optional<String> statusOf(String paymentId) {
         return byWebhookId.values().stream()
-                .filter(event -> event.isTaken() && paymentId.equals(event.paymentId()))
+                .filter(event -> event.isTaken() && event.isAboutPayment() && paymentId.equals(event.paymentId()))
                 .max(Comparator.comparing(Event::changedAt))
                 .map(Event::status);
     }

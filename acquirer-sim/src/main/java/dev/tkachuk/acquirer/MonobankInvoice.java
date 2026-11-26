@@ -2,14 +2,16 @@ package dev.tkachuk.acquirer;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /**
  * A charge as monobank shows an invoice; the invoice id is the charge's id. Statuses: "success", "failure" with an
- * errCode from monobank's list of payment errors and a reason in words, "expired" for a challenge left open, and
- * "processing" while one waits. payment-direct answers without the errCode, as monobank does, and with tdsUrl for a
- * challenge.
+ * errCode from monobank's list of payment errors and a reason in words, "expired" for a challenge left open,
+ * "processing" while one waits, and "reversed" once refunds gave all of it back. payment-direct answers without the
+ * errCode, as monobank does, and with tdsUrl for a challenge. cancelList holds the invoice's refunds, each with its
+ * extRef, and finalAmount what is left after the ones that succeeded.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 record MonobankInvoice(
@@ -22,7 +24,23 @@ record MonobankInvoice(
         long finalAmount,
         Instant createdDate,
         String reference,
-        String tdsUrl) {
+        String tdsUrl,
+        List<CancelItem> cancelList) {
+
+    /** A refund as monobank lists it: "processing", "success" or "failure". */
+    record CancelItem(String status, long amount, int ccy, Instant createdDate, Instant modifiedDate,
+            String extRef) {
+
+        static CancelItem of(Refund refund) {
+            String status = switch (refund.status()) {
+                case Refund.SUCCEEDED -> "success";
+                case Refund.FAILED -> "failure";
+                default -> "processing";
+            };
+            return new CancelItem(status, refund.amount(), ccyOf(refund.currency()), refund.createdAt(),
+                    refund.updatedAt(), refund.reference());
+        }
+    }
 
     private static final Map<String, Integer> CCY_BY_CURRENCY = Map.of("UAH", 980, "USD", 840, "EUR", 978);
 
@@ -40,22 +58,30 @@ record MonobankInvoice(
             "processing_error", new Failure("1000", "Something went wrong at the bank"),
             Issuer.AUTHENTICATION_FAILED, new Failure("1054", "3-D Secure was not passed"));
 
-    /** The invoice as monobank's status and webhooks show it. */
-    static MonobankInvoice of(Charge charge) {
+    /** The invoice as monobank's status and webhooks show it, with the charge's refunds. */
+    static MonobankInvoice of(Charge charge, List<Refund> refunds) {
         String status = statusOf(charge);
         Failure failure = status.equals("failure")
                 ? FAILURES.getOrDefault(charge.declineCode(), DECLINED)
                 : null;
+        long refunded = refunds.stream().filter(Refund::isSucceeded).mapToLong(Refund::amount).sum();
+        if (status.equals("success") && refunded >= charge.amount()) {
+            status = "reversed";
+        }
         return new MonobankInvoice(charge.id(), status, failure == null ? null : failure.errCode(),
                 failure == null ? null : failure.reason(), charge.amount(), ccyOf(charge.currency()),
-                status.equals("success") ? charge.amount() : 0, charge.createdAt(), charge.reference(), null);
+                status.equals("success") ? charge.amount() - refunded : 0, charge.createdAt(), charge.reference(),
+                null, refunds.stream().map(CancelItem::of).toList());
     }
 
-    /** The invoice as payment-direct answers: the reason for a failure in words only, and the challenge's URL. */
+    /**
+     * The invoice as payment-direct answers, for a charge just made: the reason for a failure in words only, the
+     * challenge's URL, and no refunds yet.
+     */
     static MonobankInvoice paymentDirectAnswer(Charge charge) {
-        MonobankInvoice invoice = of(charge);
+        MonobankInvoice invoice = of(charge, List.of());
         return new MonobankInvoice(invoice.invoiceId, invoice.status, null, invoice.failureReason, invoice.amount,
-                invoice.ccy, invoice.finalAmount, invoice.createdDate, invoice.reference, charge.actionUrl());
+                invoice.ccy, invoice.finalAmount, invoice.createdDate, invoice.reference, charge.actionUrl(), null);
     }
 
     /** The currency of an ISO 4217 number, among those acquirer-sim takes. */

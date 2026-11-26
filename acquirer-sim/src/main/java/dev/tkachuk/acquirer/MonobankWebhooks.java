@@ -18,8 +18,9 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * monobank-style webhooks: the invoice, signed in X-Sign, POSTed to the webHookUrl its payment-direct gave, when the
- * charge is decided. Like monobank, acquirer-sim tries up to three times, until the receiver answers 2xx. Sending
- * happens in the background, so neither the API nor the challenge page waits for the receiver.
+ * charge is decided and when one of its refunds is finished. Like monobank, acquirer-sim tries up to three times,
+ * until the receiver answers 2xx. Sending happens in the background, so neither the API nor the challenge page waits
+ * for the receiver.
  */
 @Component
 class MonobankWebhooks {
@@ -34,21 +35,27 @@ class MonobankWebhooks {
     private final MonobankKeys keys;
     private final JsonMapper jsonMapper;
     private final TaskExecutor executor;
+    private final ChargeService charges;
+    private final RefundService refunds;
     private final RestClient restClient;
     // The webhook URL of each charge that has one; past sim.max-charges the oldest is forgotten, as the charges are.
     private final Map<String, String> urlByChargeId;
 
-    MonobankWebhooks(MonobankKeys keys, JsonMapper jsonMapper, TaskExecutor executor, SimProperties properties) {
+    MonobankWebhooks(MonobankKeys keys, JsonMapper jsonMapper, TaskExecutor executor, ChargeService charges,
+            RefundService refunds, RestClient.Builder restClientBuilder, SimProperties properties) {
         this.keys = keys;
         this.jsonMapper = jsonMapper;
         this.executor = executor;
+        this.charges = charges;
+        this.refunds = refunds;
         HttpClient httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(CONNECT_TIMEOUT)
                 .build();
         JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
         requestFactory.setReadTimeout(READ_TIMEOUT);
-        this.restClient = RestClient.builder().requestFactory(requestFactory).build();
+        // Spring's builder, so the request carries the trace on to the receiver.
+        this.restClient = restClientBuilder.requestFactory(requestFactory).build();
         int maxCharges = properties.maxCharges();
         this.urlByChargeId = new LinkedHashMap<>() {
             @Override
@@ -72,7 +79,7 @@ class MonobankWebhooks {
             return;
         }
         // The exact bytes that are signed are the ones sent.
-        byte[] body = jsonMapper.writeValueAsBytes(MonobankInvoice.of(charge));
+        byte[] body = jsonMapper.writeValueAsBytes(MonobankInvoice.of(charge, refunds.ofCharge(charge.id())));
         String signature = keys.sign(body);
         executor.execute(() -> deliver(URI.create(url), body, signature, charge.id()));
     }
@@ -80,6 +87,11 @@ class MonobankWebhooks {
     @EventListener
     public void onChargeChanged(ChargeChanged event) {
         send(event.charge());
+    }
+
+    @EventListener
+    public void onRefundChanged(RefundChanged event) {
+        charges.findById(event.refund().chargeId()).ifPresent(stored -> send(stored.charge()));
     }
 
     private void deliver(URI url, byte[] body, String signature, String invoiceId) {

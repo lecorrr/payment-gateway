@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: acquirer-sim
-  version: 0.4.0
+  version: 0.6.0
   description: >-
     A simulated card acquirer for running payment-gateway without a real one. Charges are kept in memory and decided
     by the card number:
@@ -12,8 +12,9 @@ info:
     | 4000000000000002 | declined, do_not_honor                                                  |
     | 4000000000009995 | declined, insufficient_funds                                            |
     | 4000000000000119 | declined, processing_error                                              |
-    | 4000000000000259 | approved, but answered only after sim.slow-delay                        |
+    | 4000000000000259 | approved, but answered only after sim.slow-delay; so are its refunds    |
     | 4000000000003220 | requires_action: a 3-D Secure challenge at action_url decides           |
+    | 4000000000005126 | approved, but every refund of it fails with refund_declined             |
     | any other        | approved (4111111111111111, 5555555555554444, ...)                      |
 
 
@@ -26,13 +27,19 @@ info:
     way the browser then goes to the charge's `return_url`; the caller finds the outcome with a lookup.
 
 
+    **Refunds.** An approved charge can be refunded in full or in parts, as long as its refunds that succeeded or
+    are pending stay within its amount. A refund through `/v1/refunds` is decided at once.
+
+
     **monobank's API.** Under `/api/merchant`, acquirer-sim also answers the part of monobank's acquiring API that
     payment-gateway's monobank connector uses, so a second copy of it can stand in for monobank. Those requests need
     the API key in `X-Token`. The same cards decide; a charge's id is its invoice id, and a declined charge is a
     "failure" with the errCode monobank uses for it: 6 for do_not_honor, 59 insufficient_funds, 80 incorrect_cvc, 51
     expired_card, 1000 processing_error, 1054 authentication_failed. A challenge left open is "expired". When
     payment-direct gives a `webHookUrl`, the decided invoice is POSTed there, signed in `X-Sign` with the key from
-    `/api/merchant/pubkey` (ECDSA, P-256, SHA-256), up to three times. Errors are in acquirer-sim's own format.
+    `/api/merchant/pubkey` (ECDSA, P-256, SHA-256), up to three times. A refund through `invoice/cancel` is
+    "processing" for sim.refund-delay, then finished, shown in the invoice's `cancelList` by its `extRef`, and
+    POSTed in the same way. Errors are in acquirer-sim's own format.
 servers:
   - url: /
     description: The server this page comes from
@@ -88,6 +95,63 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Charge'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /v1/refunds:
+    post:
+      operationId: createRefund
+      summary: Refund all or part of a charge
+      description: >-
+        One refund per reference. The same request again returns the stored refund with 200; the same reference
+        with another charge or amount is refused with 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundRequest'
+      responses:
+        '201':
+          description: Refunded, or declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Refund'
+        '200':
+          description: The refund stored for this reference, as it is now
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Refund'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+    get:
+      operationId: findRefund
+      summary: Find the refund with a reference
+      parameters:
+        - name: reference
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The refund as it is now
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Refund'
         '401':
           $ref: '#/components/responses/Error'
         '404':
@@ -205,6 +269,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MonobankInvoice'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /api/merchant/invoice/cancel:
+    post:
+      operationId: monobankCancel
+      summary: Refund all or part of a paid invoice, as monobank's cancel
+      description: >-
+        Answers "processing"; the refund is finished after sim.refund-delay, and the invoice's webhook is sent
+        then. Without an amount, what is left of the invoice is refunded; without an extRef, the refund gets a
+        reference of its own. The same extRef and amount again returns the stored refund.
+      security:
+        - XToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MonobankCancel'
+      responses:
+        '200':
+          description: The refund's status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MonobankCancelAnswer'
+        '400':
+          $ref: '#/components/responses/Error'
         '403':
           $ref: '#/components/responses/Error'
         '404':
@@ -411,6 +505,82 @@ components:
           type: string
           enum: [client, merchant]
 
+    RefundRequest:
+      type: object
+      required: [charge_id, reference, amount]
+      properties:
+        charge_id:
+          type: string
+          maxLength: 64
+        reference:
+          type: string
+          maxLength: 64
+          description: The caller's id for the refund
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+
+    Refund:
+      type: object
+      required: [id, charge_id, reference, amount, currency, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          example: re_7d4e5f6a7b8c9d0e1f2a3b4c
+        charge_id:
+          type: string
+        reference:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        status:
+          type: string
+          enum: [succeeded, failed, pending]
+        failure_code:
+          type: string
+          description: With failed only
+          example: refund_declined
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    MonobankCancel:
+      type: object
+      required: [invoiceId]
+      properties:
+        invoiceId:
+          type: string
+          maxLength: 64
+        extRef:
+          type: string
+          maxLength: 64
+          description: The merchant's reference for the refund
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+
+    MonobankCancelAnswer:
+      type: object
+      required: [status, createdDate, modifiedDate]
+      properties:
+        status:
+          type: string
+          enum: [processing, success, failure]
+        createdDate:
+          type: string
+          format: date-time
+        modifiedDate:
+          type: string
+          format: date-time
+
     MonobankInvoice:
       type: object
       required: [invoiceId, status, amount, ccy, finalAmount, createdDate, reference]
@@ -419,7 +589,7 @@ components:
           type: string
         status:
           type: string
-          enum: [success, failure, processing, expired]
+          enum: [success, failure, processing, expired, reversed]
         errCode:
           type: string
         failureReason:
@@ -440,6 +610,28 @@ components:
         tdsUrl:
           type: string
           description: From payment-direct only, for a challenge
+        cancelList:
+          type: array
+          description: The invoice's refunds, in the order they were made; not in payment-direct's answer
+          items:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [processing, success, failure]
+              amount:
+                type: integer
+                format: int64
+              ccy:
+                type: integer
+              createdDate:
+                type: string
+                format: date-time
+              modifiedDate:
+                type: string
+                format: date-time
+              extRef:
+                type: string
 
     MonobankStatement:
       type: object

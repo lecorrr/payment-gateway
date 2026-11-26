@@ -18,7 +18,7 @@ class ChargeServiceTest {
 
     private final TestClock clock = new TestClock(Instant.parse("2026-11-25T10:00:00Z"));
     private final SimProperties properties = new SimProperties("test-acquirer-key-0123456789",
-            "http://sim.test", Duration.ZERO, TTL, 100);
+            "http://sim.test", Duration.ZERO, TTL, 100, Duration.ofSeconds(2));
     private final List<Object> events = new ArrayList<>();
     private final ChargeService charges = new ChargeService(new ChargeStore(properties), properties, clock,
             events::add);

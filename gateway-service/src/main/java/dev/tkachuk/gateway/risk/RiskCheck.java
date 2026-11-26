@@ -9,6 +9,8 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker.StateTransition;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,22 +19,31 @@ import org.springframework.stereotype.Component;
 /**
  * Asks risk-service about a new payment before it is charged, waiting gateway.risk.deadline at most. An error or no
  * answer in time goes by gateway.risk.when-unavailable; so does a payment while risk-service's circuit is open,
- * which happens once it keeps failing, so payments stop waiting for its deadline.
+ * which happens once it keeps failing, so payments stop waiting for its deadline. gateway.risk.checks counts the
+ * answers: allowed, declined, or unavailable for every payment risk-service gave no decision for.
  */
 @Component
 public class RiskCheck {
 
     private static final Logger log = LoggerFactory.getLogger(RiskCheck.class);
 
+    static final String CHECKS = "gateway.risk.checks";
+
     private final RiskServiceGrpc.RiskServiceBlockingStub risk;
     private final CircuitBreaker circuit;
     private final RiskProperties properties;
+    private final Counter allowed;
+    private final Counter declined;
+    private final Counter unavailable;
 
     RiskCheck(RiskServiceGrpc.RiskServiceBlockingStub risk, CircuitBreaker riskServiceCircuit,
-            RiskProperties properties) {
+            RiskProperties properties, MeterRegistry meters) {
         this.risk = risk;
         this.circuit = riskServiceCircuit;
         this.properties = properties;
+        this.allowed = checks(meters, "allowed");
+        this.declined = checks(meters, "declined");
+        this.unavailable = checks(meters, "unavailable");
         circuit.getEventPublisher().onStateTransition(event -> changed(event.getStateTransition()));
     }
 
@@ -56,9 +67,13 @@ public class RiskCheck {
         circuit.onSuccess(circuit.getCurrentTimestamp() - start, circuit.getTimestampUnit());
 
         return switch (answer.getDecision()) {
-            case DECISION_ALLOW -> RiskVerdict.ALLOW;
+            case DECISION_ALLOW -> {
+                allowed.increment();
+                yield RiskVerdict.ALLOW;
+            }
             case DECISION_DECLINE -> {
                 log.info("risk-service declined payment {}: {}", request.paymentId(), answer.getReason());
+                declined.increment();
                 yield RiskVerdict.DECLINE;
             }
             default -> unavailable(request, "answered without a decision");
@@ -66,12 +81,20 @@ public class RiskCheck {
     }
 
     private RiskVerdict unavailable(RiskRequest request, String why) {
+        unavailable.increment();
         if (properties.whenUnavailable() == WhenUnavailable.DECLINE) {
             log.warn("Payment {} fails: risk-service {}", request.paymentId(), why);
             return RiskVerdict.FAIL;
         }
         log.warn("Payment {} goes ahead without a risk check: risk-service {}", request.paymentId(), why);
         return RiskVerdict.ALLOW;
+    }
+
+    private static Counter checks(MeterRegistry meters, String answer) {
+        return Counter.builder(CHECKS)
+                .description("Payments risk-service was asked about, by its answer")
+                .tag("answer", answer)
+                .register(meters);
     }
 
     private static AssessRequest toAssessRequest(RiskRequest request) {

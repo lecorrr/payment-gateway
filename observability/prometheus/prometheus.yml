@@ -1,0 +1,27 @@
+# Every Spring service of compose.yaml, at its /actuator/prometheus. The job is the service's name in compose, so
+# acquirer-sim and monobank-sim, one app in two containers, stay apart.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["gateway:8090"]
+  - job_name: risk-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["risk-service:8094"]
+  - job_name: acquirer-sim
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["acquirer-sim:8091"]
+  - job_name: monobank-sim
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["monobank-sim:8091"]
+  - job_name: merchant-sim
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["merchant-sim:8092"]

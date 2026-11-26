@@ -9,7 +9,7 @@ import org.jspecify.annotations.Nullable;
 /**
  * A row of the payments table. Of the card only the brand, the first six and the last four digits are kept, which
  * PCI DSS allows to be shown. actionUrl is set while the payment is REQUIRES_ACTION, nextCheckAt while it is
- * PROCESSING or REQUIRES_ACTION.
+ * PROCESSING or REQUIRES_ACTION. refundedAmount is what its SUCCEEDED refunds gave back, in minor units.
  */
 public record Payment(
         UUID id,
@@ -28,6 +28,7 @@ public record Payment(
         String provider,
         @Nullable String providerReference,
         @Nullable String declineCode,
+        long refundedAmount,
         @Nullable String actionUrl,
         @Nullable Instant nextCheckAt,
         Instant createdAt,

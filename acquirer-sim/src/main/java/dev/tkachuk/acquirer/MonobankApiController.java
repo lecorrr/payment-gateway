@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -17,9 +18,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * The part of monobank's acquiring API the gateway's monobank connector uses, so the gateway can run with two
- * providers without a real one: payment-direct, the invoice status, the statement, and the key webhooks are signed
- * with. Charges are decided by the same test cards and kept with the others; a challenge happens on acquirer-sim's
- * own page. Errors are answered in acquirer-sim's format, not monobank's: the gateway reads only their status.
+ * providers without a real one: payment-direct, the invoice status, cancel (a refund), the statement, and the key
+ * webhooks are signed with. Charges are decided by the same test cards and kept with the others; a challenge happens
+ * on acquirer-sim's own page. A refund is "processing" for sim.refund-delay, then finished and reported by webhook.
+ * Errors are answered in acquirer-sim's format, not monobank's: the gateway reads only their status.
  */
 @RestController
 @RequestMapping(MonobankApiController.PATH)
@@ -28,11 +30,14 @@ class MonobankApiController {
     static final String PATH = "/api/merchant";
 
     private final ChargeService charges;
+    private final RefundService refunds;
     private final MonobankWebhooks webhooks;
     private final MonobankKeys keys;
 
-    MonobankApiController(ChargeService charges, MonobankWebhooks webhooks, MonobankKeys keys) {
+    MonobankApiController(ChargeService charges, RefundService refunds, MonobankWebhooks webhooks,
+            MonobankKeys keys) {
         this.charges = charges;
+        this.refunds = refunds;
         this.webhooks = webhooks;
         this.keys = keys;
     }
@@ -74,7 +79,35 @@ class MonobankApiController {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(new SimError("not_found", "No invoice has this id"));
         }
-        return ResponseEntity.ok(MonobankInvoice.of(stored.get().charge()));
+        Charge charge = stored.get().charge();
+        return ResponseEntity.ok(MonobankInvoice.of(charge, refunds.ofCharge(charge.id())));
+    }
+
+    /**
+     * Refunds all or part of a paid invoice. A repeat with the same extRef and amount gets the refund as it is now;
+     * one without an extRef gets a reference of its own, so it can't be told from a new refund.
+     */
+    @PostMapping("/invoice/cancel")
+    ResponseEntity<?> cancel(@Valid @RequestBody MonobankCancel request) {
+        Optional<StoredCharge> stored = charges.findById(request.invoiceId());
+        if (stored.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(new SimError("not_found", "No invoice has this id"));
+        }
+        long amount = request.amount() != null ? request.amount() : refunds.leftOf(stored.get().charge());
+        if (amount <= 0) {
+            return badRequest("Nothing of this invoice is left to cancel");
+        }
+        String reference = request.extRef() != null ? request.extRef() : "cancel_" + UUID.randomUUID();
+        RefundService.Result result = refunds.refund(new RefundRequest(request.invoiceId(), reference, amount), true);
+        return switch (result.kind()) {
+            case CREATED, REPLAYED -> ResponseEntity.ok(MonobankCancelAnswer.of(result.refund()));
+            case CONFLICT -> badRequest("This extRef belongs to a different cancel");
+            case NOT_REFUNDABLE -> badRequest("Only a paid invoice can be cancelled");
+            case TOO_LARGE -> badRequest("The invoice has less than this left to cancel");
+            case NO_CHARGE -> ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(new SimError("not_found", "No invoice has this id"));
+        };
     }
 
     /** The invoices made from the from second on, up to the to second if given; both are Unix times. */

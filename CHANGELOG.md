@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0 (2026-11-26)
+
+- Refunds: `POST /api/v1/payments/{id}/refunds` refunds a `SUCCEEDED` payment in full or in parts, once per
+  Idempotency-Key, through the provider that charged it; `GET` lists a payment's refunds or reads one. A refund is
+  stored under a lock on its payment before the provider is asked, so refunds sent side by side never give back
+  more than was charged, and one whose answer got lost is looked up in the background, as a payment is.
+- New codes: 409 `PAYMENT_NOT_REFUNDABLE` and `REFUND_AMOUNT_TOO_LARGE`, 404 `REFUND_NOT_FOUND`. A payment shows its
+  `refundedAmount`, and the merchant gets a `refund.succeeded` or `refund.failed` webhook for each refund.
+- The connectors refund through acquirer-sim's new `/v1/refunds` and monobank's `invoice/cancel`, and find refunds
+  by their reference and in the invoice's `cancelList`. acquirer-sim answers both, the monobank-style ones after
+  `sim.refund-delay` (2 s); every refund of the card 4000 0000 0000 5126 is declined. merchant-sim takes the
+  refund webhooks.
+- Metrics: every app has `/actuator/prometheus`. The gateway counts payments and refunds by outcome, provider and
+  code, risk-service's answers and webhook deliveries; risk-service counts its decisions by rule; the circuit
+  breakers publish their state and calls. compose runs Prometheus and Grafana, with a provisioned dashboard; new
+  host port settings `PROMETHEUS_PORT` (9090) and `GRAFANA_PORT` (3000).
+- Tracing: every app traces its requests with OpenTelemetry, across HTTP and gRPC calls, and compose sends the
+  traces to Jaeger (`JAEGER_PORT`, 16686). Log lines carry the trace id, and the gateway's startup log says where
+  traces go. risk-service has an HTTP port now, `RISK_SERVICE_HTTP_PORT` (8094), for health and metrics.
+- The API contract is 0.6.0, and acquirer-sim's describes its refunds.
+- The README names JUnit 6, which Spring Boot 4.1 brings, instead of JUnit 5.
+
 ## 0.5.0 (2026-11-26)
 
 - risk-service, a new app the gateway asks over gRPC before every charge (risk-api holds the contract,

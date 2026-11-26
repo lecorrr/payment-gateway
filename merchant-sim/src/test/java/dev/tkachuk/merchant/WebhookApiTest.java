@@ -1,6 +1,7 @@
 package dev.tkachuk.merchant;
 
 import static dev.tkachuk.merchant.SignedWebhooks.paymentEvent;
+import static dev.tkachuk.merchant.SignedWebhooks.refundEvent;
 import static dev.tkachuk.merchant.SignedWebhooks.webhook;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -38,6 +39,22 @@ class WebhookApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.webhookId == '%s')].deliveries", messageId).value(2))
                 .andExpect(jsonPath("$[?(@.webhookId == '%s')].status", messageId).value("SUCCEEDED"));
+    }
+
+    @Test
+    void shouldTakeRefundsWebhookWithItsPayment() throws Exception {
+        String messageId = UUID.randomUUID().toString();
+        String refundId = UUID.randomUUID().toString();
+        String paymentId = UUID.randomUUID().toString();
+
+        mockMvc.perform(webhook(messageId, refundEvent("refund.succeeded", refundId, paymentId, "SUCCEEDED",
+                        "2026-11-25T10:01:00Z")))
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(get("/events"))
+                .andExpect(jsonPath("$[?(@.webhookId == '%s')].refundId", messageId).value(refundId))
+                .andExpect(jsonPath("$[?(@.webhookId == '%s')].paymentId", messageId).value(paymentId))
+                .andExpect(jsonPath("$[?(@.webhookId == '%s')].type", messageId).value("refund.succeeded"));
     }
 
     @Test

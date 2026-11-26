@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.5.0</version>
+        <version>0.6.0</version>
     </parent>
 
     <artifactId>risk-service</artifactId>
@@ -19,10 +19,30 @@
             <groupId>dev.tkachuk</groupId>
             <artifactId>risk-api</artifactId>
         </dependency>
-        <!-- A Netty gRPC server on its own port; no servlet container. -->
+        <!-- A Netty gRPC server on its own port. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-grpc-server</artifactId>
+        </dependency>
+        <!-- Tomcat on a second port, for the actuator only: health, and metrics for Prometheus. Without
+             grpc-servlet-jakarta on the classpath gRPC stays on Netty. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- Traces over OTLP; the gateway's trace goes on through the gRPC call. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

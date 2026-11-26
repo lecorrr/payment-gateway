@@ -4,6 +4,9 @@ import dev.tkachuk.risk.api.RiskServiceGrpc;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig.SlidingWindowType;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.micrometer.tagged.TaggedCircuitBreakerMetricsPublisher;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -25,8 +28,9 @@ class RiskClientConfiguration {
         return RiskServiceGrpc.newBlockingStub(channels.createChannel("risk"));
     }
 
+    /** Made through a registry of its own, which publishes its state as resilience4j.circuitbreaker.* metrics. */
     @Bean
-    CircuitBreaker riskServiceCircuit(RiskProperties properties, Clock clock) {
+    CircuitBreaker riskServiceCircuit(RiskProperties properties, Clock clock, MeterRegistry meters) {
         CircuitBreakerConfig config = CircuitBreakerConfig.custom()
                 .slidingWindowType(SlidingWindowType.COUNT_BASED)
                 .slidingWindowSize(WINDOW_SIZE)
@@ -37,6 +41,7 @@ class RiskClientConfiguration {
                 .maxWaitDurationInHalfOpenState(properties.openFor())
                 .clock(clock)
                 .build();
-        return CircuitBreaker.of("risk-service", config);
+        return CircuitBreakerRegistry.of(config, new TaggedCircuitBreakerMetricsPublisher(meters))
+                .circuitBreaker("risk-service");
     }
 }

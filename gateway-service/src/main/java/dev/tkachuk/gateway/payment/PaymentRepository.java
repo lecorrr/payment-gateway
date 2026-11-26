@@ -17,7 +17,8 @@ import org.springframework.stereotype.Repository;
 /**
  * Table payments. A status change is only written while the payment is still waiting (PROCESSING, or
  * REQUIRES_ACTION for the change to an outcome), so the request, the checker and the customer's return from a
- * 3-D Secure challenge can't overwrite each other, and the first outcome stands.
+ * 3-D Secure challenge can't overwrite each other, and the first outcome stands. After that only refunded_amount
+ * changes, growing with each refund that succeeds.
  */
 @Repository
 class PaymentRepository {
@@ -161,6 +162,36 @@ class PaymentRepository {
     }
 
     /**
+     * The merchant's payment, locked until the transaction ends: refunds of one payment take turns here, so two of
+     * them can't both count the same amount as still refundable. Must be called in a transaction.
+     */
+    Optional<Payment> lockForRefund(UUID merchantId, UUID id) {
+        return jdbc.sql("SELECT * FROM payments WHERE id = :id AND merchant_id = :merchantId FOR UPDATE")
+                .param("id", id)
+                .param("merchantId", merchantId)
+                .query(PaymentRepository::fromRow)
+                .optional();
+    }
+
+    /**
+     * Adds a SUCCEEDED refund's amount to what the payment has given back. The table refuses a total above the
+     * payment's amount, so a bug can't refund more than was charged.
+     */
+    Payment addRefunded(UUID id, long amount, Instant now) {
+        return jdbc.sql("""
+                        UPDATE payments
+                        SET refunded_amount = refunded_amount + :amount, updated_at = :now
+                        WHERE id = :id
+                        RETURNING *""")
+                .param("id", id)
+                .param("amount", amount)
+                .param("now", utc(now))
+                .query(PaymentRepository::fromRow)
+                .optional()
+                .orElseThrow(() -> new IllegalStateException("Payment " + id + " is gone"));
+    }
+
+    /**
      * Claims the payments due for a check by moving their next check to leaseUntil, or to challengeLeaseUntil for one
      * waiting for its 3-D Secure challenge, so a checker running in another instance skips them. SKIP LOCKED lets
      * instances claim side by side without waiting for each other.
@@ -203,6 +234,7 @@ class PaymentRepository {
                 row.getString("provider"),
                 row.getString("provider_reference"),
                 row.getString("decline_code"),
+                row.getLong("refunded_amount"),
                 row.getString("action_url"),
                 instantOf(row, "next_check_at"),
                 instantOf(row, "created_at"),

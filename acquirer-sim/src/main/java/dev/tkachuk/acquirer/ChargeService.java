@@ -70,9 +70,11 @@ class ChargeService {
             charge = new Charge(id, request.reference(), Charge.APPROVED, null, newAuthCode(), null,
                     request.amount(), request.currency(), now);
         }
+        Issuer.RefundBehaviour refunds = Issuer.refundBehaviour(request.card());
         StoredCharge toStore = challenge
-                ? new StoredCharge(charge, hashOf(request), request.returnUrl(), now.plus(properties.challengeTtl()))
-                : new StoredCharge(charge, hashOf(request), null, null);
+                ? new StoredCharge(charge, hashOf(request), request.returnUrl(), now.plus(properties.challengeTtl()),
+                        refunds)
+                : new StoredCharge(charge, hashOf(request), null, null, refunds);
 
         StoredCharge stored = store.putIfAbsent(toStore);
         if (stored != toStore) {

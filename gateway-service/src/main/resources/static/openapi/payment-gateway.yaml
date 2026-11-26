@@ -1,10 +1,11 @@
 openapi: 3.0.3
 info:
   title: payment-gateway merchant API
-  version: 0.5.0
+  version: 0.6.0
   description: >-
     Card payments for merchants. A merchant sends the card once; the gateway passes it to a payment provider,
-    keeps only the brand, the first six and the last four digits, and answers with the payment's status.
+    keeps only the brand, the first six and the last four digits, and answers with the payment's status. A
+    payment that succeeded can be refunded, in full or in parts, through the provider that charged it.
 
 
     Every call needs the merchant's API key in the `X-Api-Key` header. Amounts are integers in minor units
@@ -18,12 +19,13 @@ info:
 
 
     **Webhooks.** A merchant with a webhook endpoint gets a POST for every status a payment reaches after
-    PROCESSING, with a `PaymentEvent` as the body. Each one is signed by the Standard Webhooks scheme: the headers
+    PROCESSING, with a `PaymentEvent` as the body, and for every refund's outcome, with a `RefundEvent`; the
+    `type` tells them apart. Each one is signed by the Standard Webhooks scheme: the headers
     `webhook-id` (the same for every retry of one event), `webhook-timestamp` (Unix seconds) and
     `webhook-signature` (`v1,` and the Base64 HMAC-SHA256 of `{webhook-id}.{webhook-timestamp}.{body}`, keyed with
     the endpoint's `whsec_` secret, Base64-decoded). Any 2xx answer counts as delivered; anything else is retried
     with growing delays for most of a day. Delivery is at least once and in no guaranteed order: deduplicate by
-    `webhook-id`, and trust the payment's `status` and `updatedAt` over the order of arrival.
+    `webhook-id`, and trust the `status` and `updatedAt` in the body over the order of arrival.
 servers:
   - url: /
     description: The server this page comes from
@@ -32,6 +34,10 @@ tags:
     description: >-
       Create a card payment and read its status. Creating needs an Idempotency-Key, so a retry after a timeout
       never charges the card twice.
+  - name: Refunds
+    description: >-
+      Give all or part of a SUCCEEDED payment back to the card, and read how its refunds went. Creating needs an
+      Idempotency-Key, so a retry after a timeout never refunds twice.
 
 security:
   - ApiKey: []
@@ -113,6 +119,113 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
 
+  /api/v1/payments/{paymentId}/refunds:
+    post:
+      tags: [Refunds]
+      operationId: createRefund
+      summary: Refund a payment
+      description: >-
+        Gives `amount` of a SUCCEEDED payment back to the card, through the provider that charged it. A payment can
+        have several refunds, as long as together they stay within its amount; a FAILED refund takes nothing from
+        it. The answer has one of three statuses. SUCCEEDED: the money is on its way back to the card. FAILED: the
+        provider refused the refund or never got it; `failureCode` says which. PROCESSING: the provider hasn't
+        finished it yet, or didn't answer in time; poll
+        `GET /api/v1/payments/{paymentId}/refunds/{refundId}` until the status changes, or wait for the webhook.
+
+
+        Repeating a request with the same Idempotency-Key returns the same refund (200, with
+        `Idempotent-Replayed: true`) instead of refunding again. The same key with a different body or for another
+        payment is refused with a 422 (IDEMPOTENCY_KEY_REUSED). A payment that is not SUCCEEDED is refused with a
+        409 (PAYMENT_NOT_REFUNDABLE), and so is an amount above what its other refunds left
+        (REFUND_AMOUNT_TOO_LARGE).
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRefundRequest'
+      responses:
+        '201':
+          description: The refund was created; its status says how far it got
+          headers:
+            Location:
+              description: Where to read the refund again
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundResponse'
+        '200':
+          description: Replay of an earlier request with the same Idempotency-Key
+          headers:
+            Idempotent-Replayed:
+              description: Always "true" on a replay
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+    get:
+      tags: [Refunds]
+      operationId: listRefunds
+      summary: List a payment's refunds
+      description: The newest first. A merchant sees only its own payments; any other id is 404.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: The payment's refunds as they are now; empty if it has none
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RefundResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+
+  /api/v1/payments/{paymentId}/refunds/{refundId}:
+    get:
+      tags: [Refunds]
+      operationId: getRefund
+      summary: Read a refund
+      description: A merchant sees only the refunds of its own payments; any other id is 404 (REFUND_NOT_FOUND).
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/RefundId'
+      responses:
+        '200':
+          description: The refund as it is now
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+
 components:
   securitySchemes:
     ApiKey:
@@ -125,7 +238,9 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Unique per payment attempt. Generate one per customer action and reuse it for retries.
+      description: >-
+        Unique per payment or refund attempt. Generate one per customer or operator action and reuse it for
+        retries.
       schema:
         type: string
         minLength: 1
@@ -133,6 +248,13 @@ components:
         example: 5c2f6a1e-8b3d-4c7a-9e0f-2a1b3c4d5e6f
     PaymentId:
       name: paymentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RefundId:
+      name: refundId
       in: path
       required: true
       schema:
@@ -252,7 +374,7 @@ components:
 
     PaymentResponse:
       type: object
-      required: [id, orderId, amount, currency, status, card, provider, createdAt, updatedAt]
+      required: [id, orderId, amount, currency, status, card, provider, refundedAmount, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -293,6 +415,70 @@ components:
             the payment before any provider saw it; a failure has the gateway's own (provider_unavailable,
             provider_rejected_request, provider_no_record, risk_unavailable)
           example: insufficient_funds
+        refundedAmount:
+          type: integer
+          format: int64
+          description: >-
+            What the payment's SUCCEEDED refunds gave back so far, in minor units; 0 until one does. It never
+            passes `amount`.
+          example: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    RefundStatus:
+      type: string
+      enum: [PROCESSING, SUCCEEDED, FAILED]
+
+    CreateRefundRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 100000000000
+          description: >-
+            In minor units of the payment's currency: the payment's whole amount, or a part of it no larger than
+            what its other refunds left
+          example: 5000
+
+    RefundResponse:
+      type: object
+      required: [id, paymentId, amount, currency, status, provider, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        paymentId:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          example: 5000
+        currency:
+          $ref: '#/components/schemas/Currency'
+        status:
+          $ref: '#/components/schemas/RefundStatus'
+        provider:
+          type: string
+          description: The payment provider that charged the payment, and so refunds it
+          example: monobank
+        providerReference:
+          type: string
+          description: The provider's own id for the refund, for providers that give one
+          example: re_7d4e5f6a7b8c
+        failureCode:
+          type: string
+          description: >-
+            Why a FAILED refund did not go through: refund_declined, or a code the provider gave for refusing it;
+            or the gateway's own (provider_unavailable, provider_rejected_request, provider_no_record)
+          example: refund_declined
         createdAt:
           type: string
           format: date-time
@@ -321,6 +507,26 @@ components:
         data:
           $ref: '#/components/schemas/PaymentResponse'
 
+    RefundEventType:
+      type: string
+      enum: [refund.succeeded, refund.failed]
+
+    RefundEvent:
+      type: object
+      required: [type, timestamp, data]
+      description: >-
+        The body of a refund's webhook: the refund as `GET /api/v1/payments/{paymentId}/refunds/{refundId}`
+        showed it right after its outcome. SUCCEEDED is refund.succeeded, FAILED refund.failed.
+      properties:
+        type:
+          $ref: '#/components/schemas/RefundEventType'
+        timestamp:
+          type: string
+          format: date-time
+          description: When the refund changed, not when the webhook was sent
+        data:
+          $ref: '#/components/schemas/RefundResponse'
+
     Problem:
       type: object
       properties:
@@ -339,7 +545,8 @@ components:
           type: string
           description: >-
             VALIDATION_FAILED, CARD_INVALID, CARD_EXPIRED, RETURN_URL_INVALID, UNAUTHORIZED, PAYMENT_NOT_FOUND,
-            IDEMPOTENCY_KEY_REUSED or INTERNAL_ERROR
+            IDEMPOTENCY_KEY_REUSED, PAYMENT_NOT_REFUNDABLE, REFUND_AMOUNT_TOO_LARGE, REFUND_NOT_FOUND or
+            INTERNAL_ERROR
           example: VALIDATION_FAILED
         violations:
           type: array

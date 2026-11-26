@@ -10,6 +10,8 @@ import dev.tkachuk.risk.api.RiskServiceGrpc;
 import dev.tkachuk.risk.support.RedisTestcontainer;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,6 +40,9 @@ class RiskServiceIT {
     @Autowired
     private StringRedisTemplate redis;
 
+    @Autowired
+    private MeterRegistry meters;
+
     private RiskServiceGrpc.RiskServiceBlockingStub risk;
     // A card of its own for each test, so no test sees another's payments.
     private String cardToken;
@@ -58,7 +63,11 @@ class RiskServiceIT {
 
     @Test
     void shouldDeclineCardFromBlockedRange() {
+        double before = assessments("decline", "blocked_card_range");
+
         assertDeclined(assess("order-1", "400009", 15000), "blocked_card_range");
+
+        assertThat(assessments("decline", "blocked_card_range") - before).isEqualTo(1);
     }
 
     @Test
@@ -124,5 +133,12 @@ class RiskServiceIT {
     private static void assertDeclined(AssessResponse answer, String reason) {
         assertThat(answer.getDecision()).isEqualTo(Decision.DECISION_DECLINE);
         assertThat(answer.getReason()).isEqualTo(reason);
+    }
+
+    private double assessments(String decision, String reason) {
+        Counter counter = meters.find(RiskGrpcService.ASSESSMENTS)
+                .tags("decision", decision, "reason", reason)
+                .counter();
+        return counter == null ? 0 : counter.count();
     }
 }

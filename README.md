@@ -5,10 +5,11 @@
 
 A card payment gateway for merchants. A merchant sends a card payment to one REST API; the gateway asks
 **risk-service** over gRPC whether the payment may go ahead, charges it with a payment provider, records the outcome,
-tells the merchant by a signed webhook, and never stores the card number. It has two providers, **acquirer-sim**, a
-simulated card acquirer, and **monobank**'s acquiring API, and moves new payments to the other one when a provider
-is down. risk-service, acquirer-sim, which can also play monobank, and **merchant-sim**, which plays the shop, live
-in this repository, so everything runs locally.
+tells the merchant by a signed webhook, and never stores the card number. A payment can be refunded, in full or in
+parts. It has two providers, **acquirer-sim**, a simulated card acquirer, and **monobank**'s acquiring API, and moves
+new payments to the other one when a provider is down. risk-service, acquirer-sim, which can also play monobank, and
+**merchant-sim**, which plays the shop, live in this repository, so everything runs locally, watched by Prometheus,
+Grafana and Jaeger.
 
 What it does:
 
@@ -26,6 +27,10 @@ What it does:
   challenges left unfinished. Several instances can run it side by side (`FOR UPDATE SKIP LOCKED`).
 - **Tells "not charged" from "don't know".** A refused request or a connection that never opened fails the payment;
   a 5xx, a read timeout or a dropped connection leaves it `PROCESSING` for the checker.
+- **Refunds, in full or in parts.** A `SUCCEEDED` payment can be refunded as often as its amount allows, once per
+  Idempotency-Key, through the provider that charged it. Each refund is stored before the provider is asked, under a
+  lock on the payment, so refunds sent side by side never give back more than was charged. One whose answer got
+  lost is looked up as a payment is.
 - **Risk check over gRPC.** Before any provider sees a payment, risk-service checks it: a blocked card range, an
   amount over its currency's limit, too many payments with one card lately (counted in Redis, once per
   Idempotency-Key). It gets a keyed hash of the card number, never the number. When risk-service is slow (a 300 ms
@@ -41,12 +46,16 @@ What it does:
 - **Contract first.** The API and the webhook body are written in OpenAPI and their Java types are generated from
   it; errors are RFC 9457 problem details with a `code`.
 - **Merchants are isolated.** API keys are stored as SHA-256 hashes; a merchant sees only its own payments.
+- **Metrics and traces.** Every service has Prometheus metrics: payments and refunds by outcome and provider,
+  risk-service's answers, webhook deliveries, the circuit breakers, latencies. A Grafana dashboard shows them.
+  OpenTelemetry traces follow a payment from the gateway through risk-service to the provider, and a webhook to the
+  merchant, into Jaeger; every log line carries its trace id.
 
 ## Stack
 
 Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis, gRPC), Protocol Buffers,
-PostgreSQL 17, Redis 8, Resilience4j, OpenAPI Generator, springdoc, JUnit 5, WireMock, Testcontainers, JaCoCo,
-Docker, GitLab CI.
+PostgreSQL 17, Redis 8, Resilience4j, Micrometer, OpenTelemetry, Prometheus, Grafana, Jaeger, OpenAPI Generator,
+springdoc, JUnit 6, WireMock, Testcontainers, JaCoCo, Docker, GitLab CI.
 
 ## Run it
 
@@ -65,14 +74,16 @@ Needs Java 21 and Docker.
    printf 'GATEWAY_DEMO_MERCHANT_API_KEY=%s\nGATEWAY_FINGERPRINT_KEY=%s\nACQUIRER_SIM_API_KEY=%s\nGATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET=whsec_%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)" "$(openssl rand -hex 16)" "$(openssl rand -base64 32)" > .env
    ```
 
-   The demo uses ports 8090 (gateway), 8091 (acquirer-sim), 8093 (monobank-sim), 8092 (merchant-sim) and 5436
-   (PostgreSQL) on localhost. If one is taken, pick others in `.env` and use them in the URLs below, for example:
+   The demo uses ports 8090 (gateway), 8091 (acquirer-sim), 8093 (monobank-sim), 8092 (merchant-sim), 5436
+   (PostgreSQL), 3000 (Grafana), 9090 (Prometheus) and 16686 (Jaeger) on localhost. If one is taken, pick others in
+   `.env` and use them in the URLs below, for example:
 
    ```bash
-   printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nMONOBANK_SIM_PORT=8193\nMERCHANT_SIM_PORT=8192\nGATEWAY_DB_PORT=5446\n' >> .env
+   printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nMONOBANK_SIM_PORT=8193\nMERCHANT_SIM_PORT=8192\nGATEWAY_DB_PORT=5446\nGRAFANA_PORT=8194\nPROMETHEUS_PORT=8195\nJAEGER_PORT=8196\n' >> .env
    ```
 
-3. Start the gateway, risk-service, both simulated providers, merchant-sim, PostgreSQL and Redis:
+3. Start the gateway, risk-service, both simulated providers, merchant-sim, PostgreSQL, Redis, Prometheus, Grafana
+   and Jaeger:
 
    ```bash
    docker compose up -d --build
@@ -109,7 +120,26 @@ Needs Java 21 and Docker.
    challenge**). The browser ends on merchant-sim's page, which shows the status the webhook brought;
    http://localhost:8092/events lists every webhook merchant-sim received.
 
-7. Take monobank away, then pay as in step 4 with a new `Idempotency-Key`:
+7. Refund part of the payment from step 4, by its `id`:
+
+   ```bash
+   curl -s -w '\n' -X POST http://localhost:8090/api/v1/payments/PAYMENT_ID/refunds -H "X-Api-Key: $KEY" -H "Idempotency-Key: refund-1001-1" -H "Content-Type: application/json" -d '{"amount": 5000}'
+   ```
+
+   The refund is `PROCESSING`: monobank may answer a refund with "processing" before it is done, and monobank-sim
+   always does. About two seconds later its webhook comes, the gateway looks the refund up, and it is `SUCCEEDED`.
+   The payment's `refundedAmount` is 5000 now, and http://localhost:8092/events has the `refund.succeeded` webhook.
+   The payment's refunds:
+
+   ```bash
+   curl -s -w '\n' http://localhost:8090/api/v1/payments/PAYMENT_ID/refunds -H "X-Api-Key: $KEY"
+   ```
+
+   Ask for more than is left, 10001 or more here, and the answer is 409 `REFUND_AMOUNT_TOO_LARGE`; the same key
+   with another amount gets 422 `IDEMPOTENCY_KEY_REUSED`. A payment acquirer-sim charged, as in the next step, is
+   refunded by acquirer-sim, which decides at once.
+
+8. Take monobank away, then pay as in step 4 with a new `Idempotency-Key`:
 
    ```bash
    docker compose stop monobank-sim
@@ -133,7 +163,7 @@ Needs Java 21 and Docker.
    It comes back with a new signing key, so for up to 10 minutes the gateway refuses its webhooks, as after a key
    change at monobank; the payments don't depend on them.
 
-8. Pay with a card from the range risk-service blocks: `DECLINED` with `risk_declined`, and no provider saw it:
+9. Pay with a card from the range risk-service blocks: `DECLINED` with `risk_declined`, and no provider saw it:
 
    ```bash
    curl -s -w '\n' -X POST http://localhost:8090/api/v1/payments -H "X-Api-Key: $KEY" -H "Idempotency-Key: order-1003-1" -H "Content-Type: application/json" -d '{"orderId": "ORDER-1003", "amount": 15000, "currency": "UAH", "card": {"number": "4000 0900 0000 0003", "expiryMonth": 12, "expiryYear": 2030, "cvc": "123"}}'
@@ -148,6 +178,17 @@ Needs Java 21 and Docker.
    `docker compose start risk-service` brings it back; within 30 s, once its circuit lets payments through again,
    they are checked again.
 
+10. Look at what the steps did. Grafana, at http://localhost:3000, opens on the payment-gateway dashboard: payments
+    and refunds by outcome and provider, latencies, the providers' circuits, risk-service's answers and the webhook
+    deliveries. In Jaeger, at http://localhost:16686, pick gateway-service and **Find Traces**: a payment's trace
+    shows the request, the risk check in risk-service and the charge at monobank-sim. Prometheus is at
+    http://localhost:9090, its targets under **Status**. A log line shows its trace id in `[traceId-spanId]`, so one
+    payment's lines can be found in both services:
+
+    ```bash
+    docker compose logs gateway risk-service | grep TRACE_ID
+    ```
+
 The API docs are at http://localhost:8090/swagger-ui.html (use **Authorize** with the key), acquirer-sim's, the
 monobank-style part included, at http://localhost:8091/swagger-ui.html. Stop everything with `docker compose down`.
 
@@ -161,7 +202,9 @@ monobank-style part included, at http://localhost:8091/swagger-ui.html. Stop eve
 | 4000 0000 0000 9995 | `DECLINED`, `insufficient_funds`                                                          |
 | 4000 0000 0000 0119 | `DECLINED`, `processing_error`                                                            |
 | 4000 0000 0000 0259 | The answer comes too late: `PROCESSING`, then `SUCCEEDED` about 30 s later by lookup      |
+|                     | (so do its refunds through acquirer-sim)                                                  |
 | 4000 0000 0000 3220 | `REQUIRES_ACTION`; passing the challenge `SUCCEEDED`, failing it `authentication_failed`  |
+| 4000 0000 0000 5126 | `SUCCEEDED`; every refund of it `FAILED`, `refund_declined`                               |
 | 4000 0900 0000 0003 | `DECLINED`, `risk_declined`: risk-service blocks the card range 400009                    |
 
 risk-service also declines, with `risk_declined`, a payment over 100 000.00 UAH (3 000.00 USD or EUR), and a card's
@@ -172,16 +215,22 @@ eleventh payment within ten minutes; retries with the same Idempotency-Key count
 
 ## API
 
-| Request                             | Answer                                                                          |
-|-------------------------------------|---------------------------------------------------------------------------------|
-| `POST /api/v1/payments`             | 201 with `Location`; 200 and `Idempotent-Replayed: true` for a repeated request |
-| `GET /api/v1/payments/{id}`         | 200, or 404 for an unknown id or another merchant's payment                     |
-| `GET /3ds/return/{id}`              | for the customer's browser after 3-D Secure: 303 to the payment's `returnUrl`   |
-| `POST /providers/monobank/webhooks` | for monobank, when an invoice changes: 200 once its signature checks out        |
+| Request                                   | Answer                                                                   |
+|-------------------------------------------|--------------------------------------------------------------------------|
+| `POST /api/v1/payments`                   | 201 with `Location`; 200 and `Idempotent-Replayed: true` for a repeat    |
+| `GET /api/v1/payments/{id}`               | 200, or 404 for an unknown id or another merchant's payment              |
+| `POST /api/v1/payments/{id}/refunds`      | 201 with `Location`; 200 and `Idempotent-Replayed: true` for a repeat    |
+| `GET /api/v1/payments/{id}/refunds`       | 200, the payment's refunds, the newest first                             |
+| `GET /api/v1/payments/{id}/refunds/{rid}` | 200, or 404                                                              |
+| `GET /3ds/return/{id}`                    | for the customer's browser after 3-D Secure: 303 to its `returnUrl`      |
+| `POST /providers/monobank/webhooks`       | for monobank, when an invoice changes: 200 once its signature checks out |
 
-The first two need `X-Api-Key`; the POST also needs `Idempotency-Key`. A payment is `PROCESSING`, or
-`REQUIRES_ACTION` with a `nextAction` while the customer is at the challenge, until it is `SUCCEEDED`, `DECLINED` or
-`FAILED`, with the reason in `declineCode`. Errors look like this:
+The payment and refund requests need `X-Api-Key`, and their POSTs an `Idempotency-Key`. A payment is `PROCESSING`,
+or `REQUIRES_ACTION` with a `nextAction` while the customer is at the challenge, until it is `SUCCEEDED`, `DECLINED`
+or `FAILED`, with the reason in `declineCode`. A refund is `PROCESSING` until it is `SUCCEEDED` or `FAILED`, with the
+reason in `failureCode`. Only a `SUCCEEDED` payment can be refunded (409 `PAYMENT_NOT_REFUNDABLE` otherwise), and
+only by what its earlier refunds left (409 `REFUND_AMOUNT_TOO_LARGE`); a `FAILED` refund leaves its amount free
+again. The payment's `refundedAmount` adds up its `SUCCEEDED` refunds. Errors look like this:
 
 ```json
 {
@@ -197,9 +246,10 @@ The contract: [payment-gateway.yaml](gateway-service/src/main/resources/static/o
 
 ## Webhooks
 
-A merchant with a webhook endpoint gets a POST for every status a payment reaches after `PROCESSING`. The body is a
-`PaymentEvent`: `type` (`payment.requires_action`, `payment.succeeded`, `payment.declined`, `payment.failed`),
-`timestamp` and the payment as the API shows it in `data`. Three headers sign it:
+A merchant with a webhook endpoint gets a POST for every status a payment reaches after `PROCESSING`, and for the
+outcome of every refund. A payment's is a `PaymentEvent`: `type` (`payment.requires_action`, `payment.succeeded`,
+`payment.declined`, `payment.failed`), `timestamp` and the payment as the API shows it in `data`. A refund's is a
+`RefundEvent`, `refund.succeeded` or `refund.failed`, with the refund in `data`. Three headers sign each:
 
 | Header              | Value                                                                                   |
 |---------------------|-----------------------------------------------------------------------------------------|
@@ -211,7 +261,7 @@ The HMAC key is the endpoint's `whsec_` secret without the prefix, Base64-decode
 body before parsing it; [WebhookVerifier](merchant-sim/src/main/java/dev/tkachuk/merchant/WebhookVerifier.java)
 in merchant-sim shows how. Any 2xx answer counts as delivered. Anything else, a redirect included, is retried after
 5 s, 5 min, 30 min, 2 h, 5 h and 10 h, each with up to a tenth more at random, then given up; 410 Gone is given up
-at once. Webhooks can come twice and out of order, so go by the payment's `status` and `updatedAt`.
+at once. Webhooks can come twice and out of order, so go by the payment's or refund's `status` and `updatedAt`.
 
 ## Providers
 
@@ -231,6 +281,13 @@ statement by its reference. When monobank can reach the gateway, it also reports
 `/providers/monobank/webhooks`; the gateway checks each report's ECDSA signature against monobank's public key and
 then looks the payment up, rather than taking the report's word.
 
+A refund goes to the provider that charged the payment, whatever `GATEWAY_PROVIDERS` says now, and never on to
+another one: money goes back the way it came. acquirer-sim decides a refund at once. monobank's `invoice/cancel`
+answers "processing", and the gateway learns the outcome from monobank's webhook or, failing that, from the
+invoice's `cancelList`, looked at 30 s after the refund and then every 10 s. A refund a provider still has no record
+of after 10 minutes is `FAILED` with `provider_no_record`, as a payment is. Refunds don't go through the circuit
+breakers: they have no other provider to go to.
+
 In compose, monobank is **monobank-sim**: a second acquirer-sim, which also answers the part of monobank's API the
 gateway uses, signed webhooks included. To use the real monobank instead, add these lines to `.env`, with your
 token, and run `docker compose up -d` again; the webhook URL stays empty unless monobank can reach this gateway:
@@ -246,6 +303,30 @@ passes the Luhn check and authorizes no money. monobank opens `payment-direct` o
 certificate, so whether a token may use it is monobank's call; a refused request ends the payment as `FAILED` with
 `provider_rejected_request`. The connector's tests run against WireMock with monobank's documented answers.
 
+## Observability
+
+Each service has its metrics at `/actuator/prometheus`, which Prometheus scrapes every 5 s
+([prometheus.yml](observability/prometheus/prometheus.yml)); Grafana has Prometheus as its data source and the
+[payment-gateway dashboard](observability/grafana/dashboards/payment-gateway.json), both provisioned from files. The
+gateway counts:
+
+| Metric                      | Labels                                                                                 |
+|-----------------------------|----------------------------------------------------------------------------------------|
+| `gateway_payments_total`    | `status`, `provider`, `code`: the decline code, `none` without one                     |
+| `gateway_refunds_total`     | `status`, `provider`, `code`: the failure code, `none` without one                     |
+| `gateway_risk_checks_total` | `answer`: `allowed`, `declined`, `unavailable` (an error, a timeout, its circuit open) |
+| `gateway_webhooks_total`    | `outcome`: `delivered`, `retrying`, `given_up`                                         |
+
+risk-service counts `risk_assessments_total` by `decision` and `reason`. Resilience4j publishes the circuit
+breakers' state and calls (`resilience4j_circuitbreaker_*`, by `name`: each provider, and risk-service), and Spring
+times the gateway's HTTP requests, in and out, and its gRPC calls as histograms, so the dashboard can show
+percentiles.
+
+Every service sends its traces over OTLP to Jaeger, which keeps them in memory, and traces every request, as a demo
+can afford to. The trace context goes along with HTTP and gRPC calls, so one trace covers a payment's request, its
+risk check and its charge. Outside compose, when `MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT` is not set,
+traces stay in the service: the gateway's startup log says which it is.
+
 ## Layout
 
 ```
@@ -256,6 +337,7 @@ risk-api/          the gRPC contract between the two (risk.proto) and the Java c
 acquirer-sim/      the simulated card acquirer with its challenge pages, a separate app with its own API and a
                    monobank-style one
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
+observability/     Prometheus' scrape settings, Grafana's data source and the dashboard
 ci/                scripts for the pipeline
 docs/              setting up GitLab, its runners and the GitHub mirror
 ```
@@ -271,4 +353,4 @@ other modules' too.
 
 ## Next
 
-Refunds; metrics and tracing; a Helm chart for several environments.
+A Helm chart for several environments, on k3d; more quality gates in the pipeline.

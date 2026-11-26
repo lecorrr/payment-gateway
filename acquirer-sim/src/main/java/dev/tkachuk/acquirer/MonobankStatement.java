@@ -9,7 +9,7 @@ record MonobankStatement(List<Item> list) {
     record Item(String invoiceId, String status, long amount, int ccy, Instant date, String reference) {
 
         static Item of(Charge charge) {
-            MonobankInvoice invoice = MonobankInvoice.of(charge);
+            MonobankInvoice invoice = MonobankInvoice.of(charge, List.of());
             return new Item(invoice.invoiceId(), invoice.status(), invoice.amount(), invoice.ccy(),
                     invoice.createdDate(), invoice.reference());
         }

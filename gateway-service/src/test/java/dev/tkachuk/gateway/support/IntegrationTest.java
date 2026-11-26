@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.client.WireMock;
+import com.jayway.jsonpath.JsonPath;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.util.Set;
@@ -34,7 +35,8 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
  * opens for 10 s once half of its last charges (at least 2, at most 4) failed. risk-service is FakeRiskService, over
  * in-process gRPC, and allows every payment until a test says otherwise. All integration tests share this one
  * context, so they share its containers too. Every test starts with no payments, no webhook events, only the demo
- * merchant, which has no webhook endpoint, a risk-service that allows everything, and every circuit closed.
+ * merchant, which has no webhook endpoint, a risk-service that allows everything, and every circuit closed. Refunds
+ * are looked up on the same timings as payments.
  */
 @SpringBootTest(properties = {
         "gateway.demo-merchant.api-key=" + IntegrationTest.DEMO_API_KEY,
@@ -107,7 +109,7 @@ public abstract class IntegrationTest {
     // Circuits before Redis: a circuit that closes removes its mark there.
     @BeforeEach
     void startClean() {
-        jdbc.execute("TRUNCATE webhook_events, payments");
+        jdbc.execute("TRUNCATE webhook_events, refunds, payments");
         jdbc.update("DELETE FROM webhook_endpoints");
         jdbc.update("DELETE FROM merchants WHERE code <> 'demo-shop'");
         acquirer.resetAll();
@@ -136,6 +138,59 @@ public abstract class IntegrationTest {
 
     protected ResultActions getPayment(String apiKey, String paymentId) throws Exception {
         return mockMvc.perform(get("/api/v1/payments/{id}", paymentId).header("X-Api-Key", apiKey));
+    }
+
+    /** A payment acquirer-sim charged: SUCCEEDED, with ch_test_1 as its provider reference. Returns its id. */
+    protected String succeededPayment(String idempotencyKey) throws Exception {
+        acquirerAnswersCharge(charge(201, "approved", null));
+        String body = createPayment(idempotencyKey, paymentRequest(VISA))
+                .andReturn().getResponse().getContentAsString();
+        return JsonPath.read(body, "$.id");
+    }
+
+    protected ResultActions createRefund(String apiKey, String paymentId, String idempotencyKey, long amount)
+            throws Exception {
+        return mockMvc.perform(MockMvcRequestBuilders.post("/api/v1/payments/{id}/refunds", paymentId)
+                .header("X-Api-Key", apiKey)
+                .header("Idempotency-Key", idempotencyKey)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"amount\": " + amount + "}"));
+    }
+
+    protected ResultActions createRefund(String paymentId, String idempotencyKey, long amount) throws Exception {
+        return createRefund(DEMO_API_KEY, paymentId, idempotencyKey, amount);
+    }
+
+    protected ResultActions getRefund(String paymentId, String refundId) throws Exception {
+        return mockMvc.perform(get("/api/v1/payments/{paymentId}/refunds/{refundId}", paymentId, refundId)
+                .header("X-Api-Key", DEMO_API_KEY));
+    }
+
+    protected ResultActions listRefunds(String paymentId) throws Exception {
+        return mockMvc.perform(get("/api/v1/payments/{id}/refunds", paymentId).header("X-Api-Key", DEMO_API_KEY));
+    }
+
+    protected void acquirerAnswersRefund(ResponseDefinitionBuilder answer) {
+        acquirer.stubFor(post("/v1/refunds").willReturn(answer));
+    }
+
+    protected void acquirerAnswersRefundLookup(String refundId, ResponseDefinitionBuilder answer) {
+        acquirer.stubFor(WireMock.get(urlPathEqualTo("/v1/refunds"))
+                .withQueryParam("reference", equalTo(refundId))
+                .willReturn(answer));
+    }
+
+    /** A refund as acquirer-sim answers it; failureCode may be null. */
+    protected static ResponseDefinitionBuilder refund(int status, String refundStatus, String failureCode) {
+        String failureCodeJson = failureCode == null ? "null" : "\"" + failureCode + "\"";
+        return aResponse()
+                .withStatus(status)
+                .withHeader("Content-Type", "application/json")
+                .withBody("""
+                        {"id": "re_test_1", "charge_id": "ch_test_1", "reference": "any", "amount": 5000,
+                         "currency": "UAH", "status": "%s", "failure_code": %s,
+                         "created_at": "2026-11-25T10:01:00Z"}"""
+                        .formatted(refundStatus, failureCodeJson));
     }
 
     protected static String paymentRequest(String cardNumber) {

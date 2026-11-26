@@ -12,6 +12,29 @@ spring:
     server:
       port: ${RISK_SERVICE_PORT:9090}
 
+# HTTP is for the actuator only: health, and metrics for Prometheus. The payments come over gRPC.
+server:
+  port: ${RISK_SERVICE_HTTP_PORT:8094}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  health:
+    redis:
+      enabled: false   # Redis down only switches the velocity rule off, so risk-service still answers
+  # Prometheus scrapes the metrics; nothing here takes them over OTLP.
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  # Every assessment is traced, as a child of the gateway's trace; traces are sent where
+  # MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT points.
+  tracing:
+    sampling:
+      probability: 1.0
+
 risk:
   velocity:
     max-payments: 10

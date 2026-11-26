@@ -45,6 +45,17 @@ class MonobankClient {
                 .body(Invoice.class);
     }
 
+    /** Gives all or part of a paid invoice back to the card. */
+    @Nullable
+    CancelAnswer cancel(CancelRequest request) {
+        return restClient.post()
+                .uri("/api/merchant/invoice/cancel")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(request)
+                .retrieve()
+                .body(CancelAnswer.class);
+    }
+
     /** The payments since this moment, newest first. */
     @Nullable
     Statement statement(Instant from) {
@@ -66,5 +77,10 @@ class MonobankClient {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     record PublicKeyAnswer(@Nullable String key) {
+    }
+
+    /** What monobank says about a refund it was just sent: "processing", "success" or "failure". */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record CancelAnswer(@Nullable String status) {
     }
 }

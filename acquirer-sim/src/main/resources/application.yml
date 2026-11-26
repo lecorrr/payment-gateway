@@ -12,12 +12,23 @@ sim:
   slow-delay: 15s   # longer than the gateway's read timeout, so its answer is lost
   challenge-ttl: 15m
   max-charges: 10000
+  # How long a refund sent the monobank way (invoice/cancel) stays "processing" before it is finished.
+  refund-delay: 2s
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
+  # Prometheus scrapes the metrics; nothing here takes them over OTLP.
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  # Every request is traced; traces are sent where MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT points.
+  tracing:
+    sampling:
+      probability: 1.0
 
 springdoc:
   swagger-ui:

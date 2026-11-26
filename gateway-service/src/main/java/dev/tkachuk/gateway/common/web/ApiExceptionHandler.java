@@ -92,10 +92,13 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     static HttpStatusCode statusOf(ErrorCode code) {
         int status = switch (code) {
-            case PAYMENT_NOT_FOUND -> 404;
+            case PAYMENT_NOT_FOUND, REFUND_NOT_FOUND -> 404;
             // Well-formed requests that can never succeed as sent. A reused key is 422 by the IETF
             // Idempotency-Key draft, not 409: retrying it won't help.
             case CARD_INVALID, CARD_EXPIRED, RETURN_URL_INVALID, IDEMPOTENCY_KEY_REUSED -> 422;
+            // Refused for how the payment is now: a PROCESSING payment may still succeed, and a PROCESSING refund
+            // that fails gives its amount back.
+            case PAYMENT_NOT_REFUNDABLE, REFUND_AMOUNT_TOO_LARGE -> 409;
         };
         return HttpStatusCode.valueOf(status);
     }

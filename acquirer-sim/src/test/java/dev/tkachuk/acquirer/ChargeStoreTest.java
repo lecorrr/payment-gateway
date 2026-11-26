@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 class ChargeStoreTest {
 
     private final ChargeStore store = new ChargeStore(new SimProperties("test-acquirer-key-0123456789",
-            "http://localhost:8091", Duration.ZERO, Duration.ofMinutes(15), 2));
+            "http://localhost:8091", Duration.ZERO, Duration.ofMinutes(15), 2, Duration.ofSeconds(2)));
 
     @Test
     void shouldKeepFirstChargeOfReference() {
@@ -68,6 +68,6 @@ class ChargeStoreTest {
 
     private static StoredCharge stored(String reference, String id, Instant createdAt) {
         Charge charge = new Charge(id, reference, Charge.APPROVED, null, "123456", null, 15000, "UAH", createdAt);
-        return new StoredCharge(charge, "hash-of-" + reference, null, null);
+        return new StoredCharge(charge, "hash-of-" + reference, null, null, Issuer.RefundBehaviour.NORMAL);
     }
 }

@@ -58,12 +58,14 @@ public class PaymentService implements ChargeNotifications {
     private final RiskCheck riskCheck;
     private final WebhookOutbox webhooks;
     private final TransactionTemplate transactions;
+    private final PaymentMetrics metrics;
     private final PaymentProperties properties;
     private final Clock clock;
 
     PaymentService(PaymentRepository payments, RequestFingerprints fingerprints, ProviderConnectors providers,
             ProviderRouter router, RiskCheck riskCheck, WebhookOutbox webhooks,
-            PlatformTransactionManager transactionManager, PaymentProperties properties, Clock clock) {
+            PlatformTransactionManager transactionManager, PaymentMetrics metrics, PaymentProperties properties,
+            Clock clock) {
         this.payments = payments;
         this.fingerprints = fingerprints;
         this.providers = providers;
@@ -71,6 +73,7 @@ public class PaymentService implements ChargeNotifications {
         this.riskCheck = riskCheck;
         this.webhooks = webhooks;
         this.transactions = new TransactionTemplate(transactionManager);
+        this.metrics = metrics;
         this.properties = properties;
         this.clock = clock;
     }
@@ -271,7 +274,7 @@ public class PaymentService implements ChargeNotifications {
         String returnUrl = request.returnUrl() == null ? null : request.returnUrl().toString();
         return new Payment(paymentId, merchantId, idempotencyKey, fingerprint, request.orderId(),
                 request.amount(), request.currency(), request.description(), returnUrl, PaymentStatus.PROCESSING,
-                number.brand(), number.bin(), number.last4(), provider, null, null, null,
+                number.brand(), number.bin(), number.last4(), provider, null, null, 0, null,
                 now.plus(properties.firstCheckAfter()), now, now);
     }
 
@@ -331,6 +334,7 @@ public class PaymentService implements ChargeNotifications {
             return current(payment);
         }
         log.info("Payment {} {}{}", payment.id(), status, code == null ? "" : " (" + code + ")");
+        metrics.paymentFinished(finished.get());
         return finished.get();
     }
 
