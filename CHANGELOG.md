@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 (2026-11-26)
+
+- acquirer-sim's tests of monobank's `invoice/cancel` give each refund a reference of its own. They all used one,
+  and since the tests share one application context, the simulator kept the first test's refund under it and
+  refused the others with 400: three tests failed, and the build stopped there.
+- The README says to start compose once the build has passed: compose builds its images from the jars, and a
+  failed build leaves some of them as the build before made them. `/actuator/info` shows each app's version.
+
 ## 0.6.0 (2026-11-26)
 
 - Refunds: `POST /api/v1/payments/{id}/refunds` refunds a `SUCCEEDED` payment in full or in parts, once per

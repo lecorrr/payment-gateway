@@ -89,6 +89,10 @@ Needs Java 21 and Docker.
    docker compose up -d --build
    ```
 
+   The images are built from the jars of step 1, so start them once step 1 has passed: a build that fails leaves
+   the jars of the modules from there on as the build before made them, and compose would run those. Each app
+   shows its version at `/actuator/info`, for example http://localhost:8090/actuator/info.
+
 4. Pay with a test card, using the demo merchant's key:
 
    ```bash

@@ -208,14 +208,15 @@ class MonobankApiTest {
     @Test
     void shouldRefundInvoiceInPartAndListItInCancelList() throws Exception {
         String invoiceId = invoiceIdOf(payDirect(newReference(), VISA, "123", null));
+        String extRef = newReference();
 
-        cancel("{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\", \"amount\": 5000}".formatted(invoiceId))
+        cancel("{\"invoiceId\": \"%s\", \"extRef\": \"%s\", \"amount\": 5000}".formatted(invoiceId, extRef))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("processing"))
                 .andExpect(jsonPath("$.createdDate").isString());
         invoiceStatus(invoiceId)
                 .andExpect(jsonPath("$.cancelList[0].status").value("processing"))
-                .andExpect(jsonPath("$.cancelList[0].extRef").value("refund-1"))
+                .andExpect(jsonPath("$.cancelList[0].extRef").value(extRef))
                 .andExpect(jsonPath("$.cancelList[0].amount").value(5000))
                 .andExpect(jsonPath("$.finalAmount").value(15000));
 
@@ -230,7 +231,7 @@ class MonobankApiTest {
     void shouldReverseInvoiceRefundedInFull() throws Exception {
         String invoiceId = invoiceIdOf(payDirect(newReference(), VISA, "123", null));
 
-        cancel("{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\"}".formatted(invoiceId))
+        cancel("{\"invoiceId\": \"%s\", \"extRef\": \"%s\"}".formatted(invoiceId, newReference()))
                 .andExpect(status().isOk());
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> invoiceStatus(invoiceId)
@@ -244,11 +245,12 @@ class MonobankApiTest {
     @Test
     void shouldAnswerRepeatedCancelWithSameRefund() throws Exception {
         String invoiceId = invoiceIdOf(payDirect(newReference(), VISA, "123", null));
-        String body = "{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\", \"amount\": 5000}".formatted(invoiceId);
+        String body = "{\"invoiceId\": \"%s\", \"extRef\": \"%s\", \"amount\": 5000}"
+                .formatted(invoiceId, newReference());
         cancel(body).andExpect(status().isOk());
 
         cancel(body).andExpect(status().isOk());
-        cancel(body.replace("5000", "6000")).andExpect(status().isBadRequest());
+        cancel(body.replace("\"amount\": 5000", "\"amount\": 6000")).andExpect(status().isBadRequest());
 
         invoiceStatus(invoiceId).andExpect(jsonPath("$.cancelList.length()").value(1));
     }
@@ -273,14 +275,16 @@ class MonobankApiTest {
                     receiver.url()));
             receiver.next();
 
-            cancel("{\"invoiceId\": \"%s\", \"extRef\": \"refund-1\", \"amount\": 5000}".formatted(invoiceId))
+            String extRef = newReference();
+            cancel("{\"invoiceId\": \"%s\", \"extRef\": \"%s\", \"amount\": 5000}".formatted(invoiceId, extRef))
+                    .andExpect(status().isOk())
                     .andExpect(jsonPath("$.status").value("processing"));
 
             Received webhook = receiver.next();
             String body = new String(webhook.body(), StandardCharsets.UTF_8);
             assertThat((String) JsonPath.read(body, "$.invoiceId")).isEqualTo(invoiceId);
             assertThat((String) JsonPath.read(body, "$.cancelList[0].status")).isEqualTo("failure");
-            assertThat((String) JsonPath.read(body, "$.cancelList[0].extRef")).isEqualTo("refund-1");
+            assertThat((String) JsonPath.read(body, "$.cancelList[0].extRef")).isEqualTo(extRef);
             assertThat(signedByKeys(webhook)).isTrue();
         }
     }
@@ -325,6 +329,8 @@ class MonobankApiTest {
                 .formatted(pan, cvv, reference, ChargeApiTest.RETURN_URL, webHook);
     }
 
+    // Charges and refunds each need a reference of their own: the tests share one application context, and with it
+    // the simulator's stores, where a reference belongs to whichever request used it first.
     private static String newReference() {
         return UUID.randomUUID().toString();
     }
