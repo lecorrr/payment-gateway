@@ -9,6 +9,10 @@ spring:
       connection-init-sql: SET lock_timeout TO '5s'   # a long lock wait fails the request instead of hanging
   flyway:
     locations: classpath:db/migration
+    # The database may be up only after the gateway, as in Kubernetes, where nothing orders the two: the migration
+    # tries to connect again for about a minute before the gateway gives up.
+    connect-retries: 12
+    connect-retries-interval: 5s
   # Shares the providers' open circuits between gateway instances. Optional: without it each instance goes by its
   # own circuits, so a payment never waits on Redis for longer than these.
   data:

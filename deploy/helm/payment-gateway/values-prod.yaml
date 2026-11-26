@@ -1,0 +1,123 @@
+# An example of production. The pipeline renders it and checks the result against Kubernetes' schemas
+# (ci/check-chart.sh), but it is never installed from this repository. It shows what changes there: no simulators,
+# so payments go to monobank; PostgreSQL and Redis are managed services, Amazon RDS and ElastiCache here; the Secret
+# comes from the cluster's secret store, such as External Secrets from AWS Secrets Manager; the images come from a
+# registry, here the project's on GitLab, which the pipeline doesn't publish to yet; Traefik serves https with a
+# certificate from cert-manager; Prometheus and an OpenTelemetry Collector watch the apps.
+image:
+  registry: registry.gitlab.com/lecorrr/payment-gateway
+
+existingSecret: payment-gateway
+
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+  tlsSecret: payment-gateway-tls
+  hosts:
+    gateway: pay.example.com
+
+gateway:
+  providers: monobank
+  monobankUrl: https://api.monobank.ua
+  env:
+    # ElastiCache with encryption in transit.
+    SPRING_DATA_REDIS_SSL_ENABLED: "true"
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      memory: 1536Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+riskService:
+  env:
+    SPRING_DATA_REDIS_SSL_ENABLED: "true"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 768Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 6
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+acquirerSim:
+  enabled: false
+monobankSim:
+  enabled: false
+merchantSim:
+  enabled: false
+
+postgres:
+  enabled: false
+database:
+  url: jdbc:postgresql://payment-gateway.cluster-example.eu-central-1.rds.amazonaws.com:5432/gateway?sslmode=require
+  username: gateway
+
+redis:
+  enabled: false
+  host: master.payment-gateway.example.euc1.cache.amazonaws.com
+  port: 6379
+
+tracing:
+  otlpEndpoint: http://otel-collector.observability:4318/v1/traces
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+networkPolicy:
+  ingressController:
+    namespace: traefik
+    podLabels:
+      app.kubernetes.io/name: traefik
+  monitoringNamespace: monitoring
+  gatewayEgress:
+    # monobank's API and the merchants' webhook endpoints, on the internet.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+    # The database and Redis, in the VPC.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - port: 5432
+        - port: 6379
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - port: 4318
+  riskServiceEgress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - port: 6379
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - port: 4318

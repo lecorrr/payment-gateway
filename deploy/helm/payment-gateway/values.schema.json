@@ -1,0 +1,240 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "payment-gateway chart values",
+  "description": "Every value the chart reads; a misspelt or unknown key fails helm install, upgrade, lint and template.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "existingSecret", "ingress", "gateway", "riskService", "acquirerSim", "monobankSim",
+    "merchantSim", "postgres", "database", "redis", "tracing", "serviceMonitor", "networkPolicy"],
+  "definitions": {
+    "host": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+    },
+    "duration": {
+      "description": "A Spring Boot duration: a number and ms, s, m, h or d.",
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d)$"
+    },
+    "quantity": {
+      "type": ["string", "number"],
+      "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$"
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": {"$ref": "#/definitions/quantity"},
+            "memory": {"$ref": "#/definitions/quantity"}
+          }
+        },
+        "limits": {
+          "description": "A memory limit only: a CPU limit would throttle the apps, and the autoscaler goes by requests.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["memory"],
+          "properties": {
+            "memory": {"$ref": "#/definitions/quantity"}
+          }
+        }
+      }
+    },
+    "env": {
+      "description": "Settings as environment variables, by name.",
+      "type": "object",
+      "propertyNames": {"pattern": "^[A-Z][A-Z0-9_]*$"},
+      "additionalProperties": {"type": "string"}
+    },
+    "autoscaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "minReplicas", "maxReplicas", "cpuPercent"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "minReplicas": {"type": "integer", "minimum": 1},
+        "maxReplicas": {"type": "integer", "minimum": 1},
+        "cpuPercent": {"type": "integer", "minimum": 10, "maximum": 100}
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "minAvailable"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "minAvailable": {"type": "integer", "minimum": 1}
+      }
+    },
+    "simulator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "egressRules": {
+      "description": "NetworkPolicy egress rules, used as they are.",
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registry", "tag", "pullPolicy"],
+      "properties": {
+        "registry": {"type": "string", "pattern": "^([a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*)?$"},
+        "tag": {"type": "string", "pattern": "^([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$"},
+        "pullPolicy": {"enum": ["IfNotPresent", "Always", "Never"]}
+      }
+    },
+    "existingSecret": {"type": "string", "minLength": 1},
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["className", "annotations", "tlsSecret", "port", "hosts"],
+      "properties": {
+        "className": {"type": "string", "minLength": 1},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "tlsSecret": {"type": "string"},
+        "port": {"type": "string", "pattern": "^([1-9][0-9]{0,4})?$"},
+        "hosts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gateway", "acquirerSim", "monobankSim", "merchantSim"],
+          "properties": {
+            "gateway": {"$ref": "#/definitions/host"},
+            "acquirerSim": {"$ref": "#/definitions/host"},
+            "monobankSim": {"$ref": "#/definitions/host"},
+            "merchantSim": {"$ref": "#/definitions/host"}
+          }
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replicas", "providers", "riskWhenUnavailable", "monobankUrl", "env", "resources", "autoscaling",
+        "podDisruptionBudget"],
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "providers": {
+          "description": "acquirer-sim, monobank, or both in either order, separated by a comma.",
+          "type": "string",
+          "pattern": "^(acquirer-sim|monobank)(,(acquirer-sim|monobank))?$"
+        },
+        "riskWhenUnavailable": {"enum": ["allow", "decline"]},
+        "monobankUrl": {"type": "string", "pattern": "^(https?://[^\\s/]+(/[^\\s]*)?)?$"},
+        "env": {"$ref": "#/definitions/env"},
+        "resources": {"$ref": "#/definitions/resources"},
+        "autoscaling": {"$ref": "#/definitions/autoscaling"},
+        "podDisruptionBudget": {"$ref": "#/definitions/podDisruptionBudget"}
+      }
+    },
+    "riskService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replicas", "maxConnectionAge", "env", "resources", "autoscaling", "podDisruptionBudget"],
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "maxConnectionAge": {"$ref": "#/definitions/duration"},
+        "env": {"$ref": "#/definitions/env"},
+        "resources": {"$ref": "#/definitions/resources"},
+        "autoscaling": {"$ref": "#/definitions/autoscaling"},
+        "podDisruptionBudget": {"$ref": "#/definitions/podDisruptionBudget"}
+      }
+    },
+    "acquirerSim": {"$ref": "#/definitions/simulator"},
+    "monobankSim": {"$ref": "#/definitions/simulator"},
+    "merchantSim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "failFirst", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "failFirst": {"type": "integer", "minimum": 0},
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "storage", "storageClass", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string", "minLength": 1},
+        "storage": {"$ref": "#/definitions/quantity"},
+        "storageClass": {"type": "string"},
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "username"],
+      "properties": {
+        "url": {"type": "string", "pattern": "^(jdbc:postgresql://[^\\s]+)?$"},
+        "username": {"type": "string", "minLength": 1}
+      }
+    },
+    "redis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "host", "port", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string", "minLength": 1},
+        "host": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "tracing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["otlpEndpoint"],
+      "properties": {
+        "otlpEndpoint": {"type": "string", "pattern": "^(https?://[^\\s]+)?$"}
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "interval", "labels"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "interval": {"type": "string", "pattern": "^[0-9]+(s|m)$"},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "ingressController", "monitoringNamespace", "gatewayEgress", "riskServiceEgress"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "ingressController": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["namespace", "podLabels"],
+          "properties": {
+            "namespace": {"type": "string", "minLength": 1},
+            "podLabels": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string"}}
+          }
+        },
+        "monitoringNamespace": {"type": "string"},
+        "gatewayEgress": {"$ref": "#/definitions/egressRules"},
+        "riskServiceEgress": {"$ref": "#/definitions/egressRules"}
+      }
+    }
+  }
+}

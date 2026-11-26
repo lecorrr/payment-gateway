@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class AcquirerSimPropertiesTest {
@@ -24,9 +25,25 @@ class AcquirerSimPropertiesTest {
     }
 
     @Test
-    void shouldNeedApiKey() {
+    void shouldBeConfiguredWithApiKey() {
+        AcquirerSimProperties properties = new AcquirerSimProperties(URL, " " + KEY + "\n", TWO_SECONDS,
+                FIVE_SECONDS);
+
+        assertThat(properties.isConfigured()).isTrue();
+        assertThat(properties.apiKey()).isEqualTo(KEY);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "\t\n"})
+    void shouldBeUnconfiguredWithoutApiKey(String apiKey) {
+        assertThat(new AcquirerSimProperties(URL, apiKey, TWO_SECONDS, FIVE_SECONDS).isConfigured()).isFalse();
+    }
+
+    @Test
+    void shouldRefuseApiKeyWithSpaceInIt() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new AcquirerSimProperties(URL, " ", TWO_SECONDS, FIVE_SECONDS))
+                .isThrownBy(() -> new AcquirerSimProperties(URL, "test acquirer key", TWO_SECONDS, FIVE_SECONDS))
                 .withMessageContaining("ACQUIRER_SIM_API_KEY");
     }
 

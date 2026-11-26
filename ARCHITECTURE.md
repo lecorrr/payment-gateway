@@ -11,7 +11,8 @@ behind the gateway, with its own API, error format and naming (snake_case), the 
 Secure. **risk-api** is no app: it holds the gRPC contract, risk.proto, and the Java code generated from it, which
 the gateway and risk-service both build on. Apart from that contract the apps share no code: merchant-sim checks
 webhook signatures with its own code, and a test in each app checks the same published signature example, so the two
-sides can't drift apart. In compose, Prometheus, Grafana and Jaeger watch all of them (see Observability).
+sides can't drift apart. In compose, Prometheus, Grafana and Jaeger watch all of them (see Observability). On
+Kubernetes, one Helm chart runs them, an environment per namespace (see Kubernetes).
 
 ## Modules of gateway-service
 
@@ -290,8 +291,68 @@ always looked up with the provider that charged it, so changing the order leaves
 - **Grafana** is provisioned from files: Prometheus as its data source, and the dashboard, read-only (a changed
   copy is saved under another name). Anonymous visitors may look, as a demo on localhost can allow.
 
-In compose the actuator answers on the API port, as health already did; a deployment would move it to a management
-port (`management.server.port`) that only Prometheus reaches.
+In compose the actuator answers on the API port, as health already did. On Kubernetes it has a port of its own,
+8081 (`management.server.port`), which the Ingress doesn't route and the network policies open only to Prometheus
+and `helm test`.
+
+## Kubernetes
+
+[deploy/helm/payment-gateway](deploy/helm/payment-gateway) is one chart for every environment, installed once per
+namespace. Its objects are named after the apps, as compose's services are, so the apps find each other by the same
+names: `postgres`, `redis`, `risk-service`. An environment's values file holds only what it changes: replicas,
+autoscaling and disruption budgets, whether the simulators, PostgreSQL and Redis run in the namespace, the Ingress
+hosts, where traces go. `values.schema.json` refuses a value the chart doesn't know, and a few checks in the
+templates refuse what doesn't fit together, such as a disruption budget no node drain could ever meet.
+
+Every pod of an app:
+
+- runs as its image's user, never root, with a read-only root file system (`/tmp` is an emptyDir), no Linux
+  capabilities and the runtime's seccomp profile: the restricted Pod Security Standard, which the namespaces of
+  `deploy/k3d` enforce;
+- gets no service account token, since nothing here calls the Kubernetes API, and no service link variables: with
+  them, the Service `redis` would set `REDIS_PORT=tcp://...` in every pod, where the gateway reads its own setting;
+- is probed on its management port (risk-service's HTTP port has nothing else, so it is 8094 there). The startup
+  probe gives the JVM three minutes; liveness and readiness ask Spring Boot's health groups;
+- stops in two steps: the preStop hook waits 10 s while the pod leaves the Service and the Ingress's backends, then
+  Spring finishes the requests it has, for up to 30 s. The gateway and risk-service roll out with
+  `maxUnavailable: 0`, so a rollout never has fewer ready pods than before it.
+
+The Secret is made outside the chart (`deploy.sh` makes one of random keys on k3d; in production the cluster's
+secret store would), and the chart only reads it, so no secret is in a values file or in Helm's release history.
+It stays after `helm uninstall`, as PostgreSQL's volume does, whose password it holds.
+
+The network policies deny everything in both directions, let every pod use the cluster's DNS, and then open what
+the apps need:
+
+| From                    | To                                                                                   |
+|-------------------------|--------------------------------------------------------------------------------------|
+| the ingress controller  | gateway 8090, acquirer-sim and monobank-sim 8091, merchant-sim 8092                  |
+| gateway                 | postgres 5432, redis 6379, risk-service 9090, the simulators 8091, merchant-sim 8092 |
+| risk-service            | redis 6379                                                                           |
+| monobank-sim            | gateway 8090: its webhooks                                                           |
+| `helm test`, Prometheus | every app's management port                                                          |
+
+Outside the namespace, production adds the gateway's egress to monobank's API and the merchants' webhook endpoints
+(443) and to the managed database, and both apps' to the managed Redis and the OpenTelemetry Collector
+(`networkPolicy.gatewayEgress`, `riskServiceEgress`).
+
+risk-service's Service is headless: its name resolves to every ready pod, and each gateway's gRPC channel (target
+`dns:///risk-service:9090`, with Spring Boot's default `round_robin`) keeps a connection to each pod and takes turns.
+risk-service ends every connection after `riskService.maxConnectionAge` (1 min; 30 s in staging), so the gateways
+resolve the name again and a pod that came up after them, in a rollout or by the autoscaler, gets calls too.
+
+The simulators keep their state in memory (charges, challenges, monobank-sim's signing key), so each runs as one
+pod that a new one replaces (`Recreate`) rather than runs beside. PostgreSQL is a StatefulSet with a volume claim,
+running as the alpine image's postgres user (70) with `PGDATA` a folder inside the volume, since that user may not
+own the volume's top. Redis keeps nothing on disk: the open circuits and recent payment counts mean nothing after
+a restart.
+
+On k3d, `deploy.sh` builds the images from the jars and tags them with a checksum of the jars, so a new build means
+new pods and the same jars change nothing. `k3d image import` loads them, PostgreSQL's and Redis' with them, into
+every node, so nothing is pulled from a registry. The chart is checked twice: `ci/check-chart.sh` renders every
+environment and checks the result against Kubernetes 1.35's schemas, along with values the chart must refuse, and
+`deploy/k3d/smoke-test.sh` checks an environment that runs, from outside through the Ingress and from inside the
+pods.
 
 ## Decisions
 
@@ -340,6 +401,24 @@ port (`management.server.port`) that only Prometheus reaches.
 - **Metrics pulled, traces pushed.** Prometheus scraping is how Spring apps are usually watched and needs nothing
   in the apps but an endpoint; traces go out over OTLP, so the tracing backend can change without the apps
   changing.
+- **One chart, a values file per environment.** The templates are the same everywhere and an environment is the
+  short list of what differs, checked by the chart's schema; a chart or overlay per environment would let the
+  manifests themselves drift apart.
+- **The chart reads a Secret, it doesn't make one.** Secrets in values files end up in git or in Helm's release
+  history; a Secret made apart from the release also outlives it together with the database it opens.
+- **Readiness is the app's own.** A gateway that can't reach PostgreSQL still answers, with an error, while one
+  taken out of the Service doesn't answer at all; and with the database in readiness, one database outage would
+  take every gateway out at once.
+- **Deny by default between pods.** A pod that is taken over reaches only what its app needs, and only the gateway
+  reaches the database.
+- **gRPC balanced by the client.** Through a Service's virtual IP, each gateway's single HTTP/2 connection would
+  take all its calls to one risk-service pod; the headless Service and connections that end after a while spread
+  them over every pod, new ones too.
+- **A provider's settings only when it is used.** acquirer-sim's key, like monobank's token, is needed only when
+  `GATEWAY_PROVIDERS` names it: production runs without the simulator.
+- **The gateway waits for its database.** Kubernetes starts the gateway and PostgreSQL side by side, so the
+  migration tries to connect for about a minute (Flyway's `connect-retries`) rather than the gateway failing and
+  restarting until the database is up.
 - **One clock.** All timestamps come from the `Clock` bean, truncated to microseconds like PostgreSQL's, so a
   payment returned right away equals the one read back later.
 
@@ -351,7 +430,7 @@ port (`management.server.port`) that only Prometheus reaches.
 | `GATEWAY_PUBLIC_URL`                            | http://localhost:8090   | the gateway as browsers reach it, for the 3-D Secure return |
 | `GATEWAY_DEMO_MERCHANT_API_KEY`                 | empty: no demo merchant | the demo merchant's API key, 24+ characters                |
 | `GATEWAY_DEMO_MERCHANT_WEBHOOK_URL`, `_SECRET`  | empty: no webhooks      | the demo merchant's webhook endpoint and `whsec_` secret   |
-| `ACQUIRER_SIM_URL`, `ACQUIRER_SIM_API_KEY`      | localhost:8091, none    | where acquirer-sim is, and its key                         |
+| `ACQUIRER_SIM_URL`, `ACQUIRER_SIM_API_KEY`      | localhost:8091, empty: not configured | where acquirer-sim is, and its key; needed when `GATEWAY_PROVIDERS` names it |
 | `GATEWAY_PROVIDERS`                             | acquirer-sim            | the providers new payments go to, the preferred one first  |
 | `REDIS_HOST`, `REDIS_PORT`                      | localhost, 6379         | Redis, to share open circuits between instances; optional  |
 | `gateway.providers.circuit-breaker.open-for`    | 30s                     | how long a failing provider is skipped; Routing has the rest |
@@ -381,6 +460,9 @@ port (`management.server.port`) that only Prometheus reaches.
 | `MERCHANT_SIM_WEBHOOK_SECRET`                   | none: required          | merchant-sim's copy of the demo merchant's webhook secret  |
 | `MERCHANT_SIM_FAIL_FIRST`                       | 0                       | deliveries of each webhook merchant-sim answers 503 first  |
 | `MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT` | empty: none sent | where every app sends its traces; compose: Jaeger's `/v1/traces` |
+| `MANAGEMENT_SERVER_PORT`                        | the app's own port      | where the actuator answers; the chart: 8081                |
+| `spring.flyway.connect-retries`, `-interval`    | 12, 5s                  | how long the gateway's migration waits for the database    |
+| `spring.grpc.server.keepalive.connection.max-age` | none                  | risk-service: when a connection ends; the chart: 1m        |
 | `management.tracing.sampling.probability`       | 1.0                     | the share of requests traced                               |
 | `GRAFANA_PORT`, `PROMETHEUS_PORT`, `JAEGER_PORT` | 3000, 9090, 16686      | compose: the host ports of the three                       |
 

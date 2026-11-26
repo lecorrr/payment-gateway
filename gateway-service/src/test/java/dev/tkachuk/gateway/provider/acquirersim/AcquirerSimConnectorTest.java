@@ -214,6 +214,16 @@ class AcquirerSimConnectorTest {
         assertThat(connector.lookup(LOOKUP)).isEqualTo(ProviderResult.unknown());
     }
 
+    @Test
+    void shouldNeedApiKeyToCharge() {
+        AcquirerSimConnector unconfigured = new AcquirerSimConnector(RestClient.builder(),
+                new AcquirerSimProperties(acquirer.baseUrl(), "", Duration.ofMillis(300), Duration.ofMillis(700)));
+
+        assertThat(unconfigured.missingSettings()).singleElement()
+                .satisfies(setting -> assertThat(setting).contains("ACQUIRER_SIM_API_KEY"));
+        assertThat(connector.missingSettings()).isEmpty();
+    }
+
     private static AcquirerSimConnector connectorFor(String baseUrl) {
         return new AcquirerSimConnector(RestClient.builder(),
                 new AcquirerSimProperties(baseUrl, API_KEY, Duration.ofMillis(300), Duration.ofMillis(700)));

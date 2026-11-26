@@ -1,0 +1,134 @@
+{{- $gatewayUrl := include "payment-gateway.publicUrl" (dict "root" $ "host" .Values.ingress.hosts.gateway) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "gateway") | nindent 4 }}
+spec:
+  {{- if not .Values.gateway.autoscaling.enabled }}
+  replicas: {{ .Values.gateway.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "gateway") | nindent 6 }}
+  # A new pod is ready before an old one goes, so a rollout never leaves fewer gateways than there were.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "payment-gateway.labels" (dict "root" $ "name" "gateway") | nindent 8 }}
+    spec:
+      {{- include "payment-gateway.podDefaults" . | nindent 6 }}
+      securityContext:
+        {{- include "payment-gateway.podSecurityContext" (dict "uid" 10001 "gid" 10001) | nindent 8 }}
+      # Spread over the nodes where there is a choice, so a node going away leaves the other nodes' gateways.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "gateway") | nindent 14 }}
+      # The preStop wait, then up to 30 s for the requests in flight.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: gateway
+          image: {{ include "payment-gateway.image" (dict "root" $ "name" "gateway-service") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8090
+            - name: management
+              containerPort: 8081
+          env:
+            {{- include "payment-gateway.springEnv" . | nindent 12 }}
+            {{- if .Values.postgres.enabled }}
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/gateway
+            {{- else }}
+            - name: DB_URL
+              value: {{ required "database.url is needed when postgres.enabled is false" .Values.database.url | quote }}
+            {{- end }}
+            - name: DB_USER
+              value: {{ .Values.database.username | quote }}
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "DB_PASSWORD") | nindent 12 }}
+            {{- include "payment-gateway.redisEnv" . | nindent 12 }}
+            # gRPC's own DNS resolver sees every ready pod behind the headless Service, and the calls go round them.
+            - name: RISK_SERVICE_TARGET
+              value: dns:///risk-service:9090
+            - name: GATEWAY_RISK_WHEN_UNAVAILABLE
+              value: {{ .Values.gateway.riskWhenUnavailable | quote }}
+            - name: GATEWAY_PROVIDERS
+              value: {{ .Values.gateway.providers | quote }}
+            - name: GATEWAY_PUBLIC_URL
+              value: {{ $gatewayUrl | quote }}
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "GATEWAY_FINGERPRINT_KEY") | nindent 12 }}
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "GATEWAY_DEMO_MERCHANT_API_KEY" "optional" true) | nindent 12 }}
+            {{- if .Values.acquirerSim.enabled }}
+            - name: ACQUIRER_SIM_URL
+              value: http://acquirer-sim:8091
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "ACQUIRER_SIM_API_KEY") | nindent 12 }}
+            {{- end }}
+            {{- if .Values.monobankSim.enabled }}
+            # monobank is monobank-sim, with acquirer-sim's key as the token; its webhooks come straight here.
+            - name: MONOBANK_URL
+              value: http://monobank-sim:8091
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "GATEWAY_MONOBANK_TOKEN" "key" "ACQUIRER_SIM_API_KEY") | nindent 12 }}
+            - name: GATEWAY_MONOBANK_WEBHOOK_URL
+              value: http://gateway:8090/providers/monobank/webhooks
+            {{- else }}
+            {{- with .Values.gateway.monobankUrl }}
+            - name: MONOBANK_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "GATEWAY_MONOBANK_TOKEN" "optional" true) | nindent 12 }}
+            # monobank reports invoice changes to the gateway's public address.
+            - name: GATEWAY_MONOBANK_WEBHOOK_URL
+              value: {{ printf "%s/providers/monobank/webhooks" $gatewayUrl | quote }}
+            {{- end }}
+            {{- if .Values.merchantSim.enabled }}
+            - name: GATEWAY_DEMO_MERCHANT_WEBHOOK_URL
+              value: http://merchant-sim:8092/webhooks
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET") | nindent 12 }}
+            {{- end }}
+            {{- range $name, $value := .Values.gateway.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- include "payment-gateway.springProbes" . | nindent 10 }}
+          {{- include "payment-gateway.springShutdown" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext:
+            {{- include "payment-gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            # The root file system is read-only; Tomcat and the JVM keep their temporary files here.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "gateway") | nindent 4 }}
+spec:
+  selector:
+    {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "gateway") | nindent 4 }}
+  ports:
+    # The API, the 3-D Secure return and the providers' webhooks; the Ingress routes to this port only.
+    - name: http
+      port: 8090
+      targetPort: http
+    # Health, info and Prometheus' metrics, for the probes and Prometheus.
+    - name: management
+      port: 8081
+      targetPort: management

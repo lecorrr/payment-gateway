@@ -1,0 +1,16 @@
+{{- $gatewayUrl := include "payment-gateway.publicUrl" (dict "root" $ "host" .Values.ingress.hosts.gateway) -}}
+payment-gateway {{ include "payment-gateway.imageTag" . }} is in the namespace {{ .Release.Namespace }}.
+
+The API:       {{ $gatewayUrl }}/api/v1/payments
+The API docs:  {{ $gatewayUrl }}/swagger-ui.html
+{{- if .Values.merchantSim.enabled }}
+The demo shop's webhooks: {{ include "payment-gateway.publicUrl" (dict "root" $ "host" .Values.ingress.hosts.merchantSim) }}/events
+{{- end }}
+
+The demo merchant's API key, when the Secret has one:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }} -o jsonpath='{.data.GATEWAY_DEMO_MERCHANT_API_KEY}' | base64 -d
+
+Whether every app is ready:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

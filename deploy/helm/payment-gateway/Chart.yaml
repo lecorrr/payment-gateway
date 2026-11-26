@@ -1,0 +1,13 @@
+apiVersion: v2
+name: payment-gateway
+description: >-
+  The payment gateway with risk-service, for one environment per namespace: the simulated providers and shop, and
+  PostgreSQL and Redis, where the environment has none of its own.
+type: application
+# The chart is released with the apps, so both versions follow the Maven version in pom.xml.
+version: 0.7.0
+appVersion: "0.7.0"
+kubeVersion: ">=1.30.0-0"
+home: https://gitlab.com/lecorrr/payment-gateway
+sources:
+  - https://gitlab.com/lecorrr/payment-gateway

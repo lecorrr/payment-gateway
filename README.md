@@ -9,7 +9,8 @@ tells the merchant by a signed webhook, and never stores the card number. A paym
 parts. It has two providers, **acquirer-sim**, a simulated card acquirer, and **monobank**'s acquiring API, and moves
 new payments to the other one when a provider is down. risk-service, acquirer-sim, which can also play monobank, and
 **merchant-sim**, which plays the shop, live in this repository, so everything runs locally, watched by Prometheus,
-Grafana and Jaeger.
+Grafana and Jaeger. A Helm chart runs the same apps on Kubernetes, with values for dev, staging and production; dev
+and staging run on a local k3d cluster.
 
 What it does:
 
@@ -50,12 +51,17 @@ What it does:
   risk-service's answers, webhook deliveries, the circuit breakers, latencies. A Grafana dashboard shows them.
   OpenTelemetry traces follow a payment from the gateway through risk-service to the provider, and a webhook to the
   merchant, into Jaeger; every log line carries its trace id.
+- **Kubernetes, per environment.** One Helm chart, with values for dev, staging and production. Staging runs two
+  gateways and two risk-services, the gateways autoscaled, and a rollout loses no payment; production takes managed
+  PostgreSQL and Redis and the real monobank. Each pod reaches only what it needs (network policies), meets the
+  restricted Pod Security Standard and is probed on a management port the Ingress doesn't route. The pipeline
+  checks the chart for every environment against Kubernetes' schemas.
 
 ## Stack
 
 Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis, gRPC), Protocol Buffers,
 PostgreSQL 17, Redis 8, Resilience4j, Micrometer, OpenTelemetry, Prometheus, Grafana, Jaeger, OpenAPI Generator,
-springdoc, JUnit 6, WireMock, Testcontainers, JaCoCo, Docker, GitLab CI.
+springdoc, JUnit 6, WireMock, Testcontainers, JaCoCo, Docker, Kubernetes, Helm, k3d, kubeconform, GitLab CI.
 
 ## Run it
 
@@ -217,6 +223,82 @@ eleventh payment within ten minutes; retries with the same Idempotency-Key count
 `authentication_expired`. A past expiry date or a number that fails the Luhn check is refused by the gateway itself
 (422 `CARD_EXPIRED`, `CARD_INVALID`) before any provider sees it.
 
+## Run it on Kubernetes
+
+The chart in [deploy/helm/payment-gateway](deploy/helm/payment-gateway) puts one environment into a namespace. dev
+and staging run on a local [k3d](https://k3d.io) cluster, which is k3s in Docker, with one server and two agents;
+production is an example the pipeline checks and nothing installs:
+
+|                   | dev                         | staging                            | production (example)                |
+|-------------------|-----------------------------|------------------------------------|-------------------------------------|
+| gateway           | 1 pod                       | 2 to 4 by CPU, a disruption budget | 3 to 10 by CPU, a disruption budget |
+| risk-service      | 1 pod                       | 2, a disruption budget             | 3 to 6 by CPU, a disruption budget  |
+| providers         | monobank-sim, acquirer-sim  | monobank-sim, acquirer-sim         | monobank                            |
+| PostgreSQL, Redis | in the namespace            | in the namespace                   | managed: Amazon RDS, ElastiCache    |
+| reached at        | http://*.dev.localhost:8280 | http://*.staging.localhost:8280    | https://pay.example.com             |
+
+It needs Docker, [k3d](https://k3d.io/stable/#installation) 5.9, [kubectl](https://kubernetes.io/docs/tasks/tools/)
+1.34 to 1.36 and [Helm](https://helm.sh/docs/intro/install/) 4, and port 8280 free on localhost. Names under
+`.localhost` lead to this machine in browsers and in curl.
+
+1. Build and test, as for compose:
+
+   ```bash
+   ./mvnw clean verify
+   ```
+
+2. Create the cluster:
+
+   ```bash
+   deploy/k3d/create-cluster.sh
+   ```
+
+3. Put dev on it. This builds the images from the jars and loads them into the nodes, makes the namespace
+   `payment-gateway-dev` with a Secret of new random keys, installs the chart with `values-dev.yaml`, waits until
+   every app is ready and runs `helm test`:
+
+   ```bash
+   deploy/k3d/deploy.sh dev
+   ```
+
+4. Check it end to end. Through the Ingress, as a merchant and a customer's browser would, it pays, replays,
+   refunds and goes through 3-D Secure, and from inside the pods it checks the network policies:
+
+   ```bash
+   deploy/k3d/smoke-test.sh dev
+   ```
+
+5. Pay by hand with the demo merchant's key, which is in the Secret:
+
+   ```bash
+   KEY=$(kubectl --context k3d-payment-gateway -n payment-gateway-dev get secret payment-gateway -o jsonpath='{.data.GATEWAY_DEMO_MERCHANT_API_KEY}' | base64 -d)
+   ```
+
+   ```bash
+   curl -s -w '\n' -X POST http://gateway.dev.localhost:8280/api/v1/payments -H "X-Api-Key: $KEY" -H "Idempotency-Key: order-2001-1" -H "Content-Type: application/json" -d '{"orderId": "ORDER-2001", "amount": 15000, "currency": "UAH", "returnUrl": "http://shop.dev.localhost:8280/return", "card": {"number": "4000 0000 0000 3220", "expiryMonth": 12, "expiryYear": 2030, "cvc": "123"}}'
+   ```
+
+   The answer's `nextAction.url` is monobank-sim's challenge page at http://monobank.dev.localhost:8280; confirm
+   it, and the browser ends on the shop's page. The API docs are at http://gateway.dev.localhost:8280/swagger-ui.html.
+
+6. Staging goes the same way, with `deploy/k3d/deploy.sh staging` and `deploy/k3d/smoke-test.sh staging`. There the
+   smoke test also checks that both risk-service pods get calls, and rolls the gateways over while it pays: no
+   payment may be lost.
+
+After a new build, `deploy.sh` again puts it out: images of other jars get a new tag, and the pods are replaced
+one by one. An environment goes, with its database and keys, like this:
+
+```bash
+helm --kube-context k3d-payment-gateway uninstall payment-gateway -n payment-gateway-dev
+```
+
+```bash
+kubectl --context k3d-payment-gateway delete namespace payment-gateway-dev
+```
+
+and the cluster with `k3d cluster delete payment-gateway`. How the chart is built, and why:
+[ARCHITECTURE.md](ARCHITECTURE.md#kubernetes).
+
 ## API
 
 | Request                                   | Answer                                                                   |
@@ -342,7 +424,8 @@ acquirer-sim/      the simulated card acquirer with its challenge pages, a separ
                    monobank-style one
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
 observability/     Prometheus' scrape settings, Grafana's data source and the dashboard
-ci/                scripts for the pipeline
+deploy/            the Helm chart with each environment's values (helm/), the local k3d cluster and its scripts (k3d/)
+ci/                scripts for the pipeline: the coverage report, the chart's check
 docs/              setting up GitLab, its runners and the GitHub mirror
 ```
 
@@ -351,10 +434,12 @@ How the parts fit, and why: [ARCHITECTURE.md](ARCHITECTURE.md).
 ## CI
 
 The repository lives on [GitLab](https://gitlab.com/lecorrr/payment-gateway), where every push runs the tests, the
-coverage gate and the image builds on GitLab's own runners ([docs/gitlab-setup.md](docs/gitlab-setup.md)). The
+coverage gate, the chart's check for every environment and the image builds on GitLab's own runners
+([docs/gitlab-setup.md](docs/gitlab-setup.md)). The
 GitHub copy is a mirror of it. The coverage badge shows gateway-service's line coverage; the pipeline log has the
 other modules' too.
 
 ## Next
 
-A Helm chart for several environments, on k3d; more quality gates in the pipeline.
+More quality gates in the pipeline, and the images published to the project's registry on GitLab, where
+`values-prod.yaml` takes them from.

@@ -1,0 +1,48 @@
+{{- $urls := list "http://gateway:8081/actuator/health/readiness" "http://risk-service:8094/actuator/health/readiness" }}
+{{- if .Values.acquirerSim.enabled }}
+{{- $urls = append $urls "http://acquirer-sim:8081/actuator/health/readiness" }}
+{{- end }}
+{{- if .Values.monobankSim.enabled }}
+{{- $urls = append $urls "http://monobank-sim:8081/actuator/health/readiness" }}
+{{- end }}
+{{- if .Values.merchantSim.enabled }}
+{{- $urls = append $urls "http://merchant-sim:8081/actuator/health/readiness" }}
+{{- end }}
+# helm test: every app answers ready on its management port, asked from inside the namespace. It runs in the
+# gateway's image, which has curl, so the test needs no image of its own. Each URL gets about 30 s: the network
+# policies may take a few seconds to cover a pod as new as this one.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: readiness-test
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "readiness-test") | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- include "payment-gateway.podDefaults" . | nindent 2 }}
+  securityContext:
+    {{- include "payment-gateway.podSecurityContext" (dict "uid" 10001 "gid" 10001) | nindent 4 }}
+  containers:
+    - name: readiness-test
+      image: {{ include "payment-gateway.image" (dict "root" $ "name" "gateway-service") }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          for url in {{ join " " $urls }}; do
+            echo "$url"
+            curl --silent --show-error --fail --max-time 5 --retry 12 --retry-delay 2 --retry-all-errors "$url"
+            echo
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 64Mi
+      securityContext:
+        {{- include "payment-gateway.containerSecurityContext" . | nindent 8 }}

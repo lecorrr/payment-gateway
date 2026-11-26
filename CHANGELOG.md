@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0 (2026-11-26)
+
+- A Helm chart, `deploy/helm/payment-gateway`, for one environment per namespace, with values for dev, staging and
+  production. dev runs one pod of each app; staging runs the gateway and risk-service as production would, two or
+  more of each, the gateways autoscaled, both with disruption budgets; production has no simulators, takes
+  PostgreSQL and Redis as managed services and pays through the real monobank. `values.schema.json` refuses an
+  unknown or misspelt value.
+- In every environment: probes on a management port of its own (8081), which the Ingress doesn't route; a wait
+  before each pod stops, so rollouts lose no requests; the restricted Pod Security Standard and a read-only root
+  file system; network policies that let each pod reach only what it needs; secrets from a Secret made outside the
+  chart. The gateways balance their gRPC calls over every risk-service pod, through a headless Service, and
+  risk-service ends connections after a minute, so new pods get calls too.
+- `deploy/k3d`: a local cluster of three nodes (`create-cluster.sh`), `deploy.sh` to build the images and put dev
+  or staging on it, and `smoke-test.sh`, which pays, refunds and goes through 3-D Secure there from outside, checks
+  the network policies from inside the pods and, in staging, that every risk-service pod gets calls and that a
+  rollout of the gateway loses no payment.
+- The gateway needs acquirer-sim's API key only when `GATEWAY_PROVIDERS` names acquirer-sim, as with monobank's
+  token, so an environment without the simulator needs no key for it.
+- The gateway's database migration tries to connect for about a minute, since on Kubernetes the database may come
+  up after the gateway.
+- The pipeline has a `chart` job: `helm lint`, `helm template` for each environment, the output checked against
+  Kubernetes 1.35's schemas with kubeconform, and values the chart must refuse (`ci/check-chart.sh`).
+
 ## 0.6.1 (2026-11-26)
 
 - acquirer-sim's tests of monobank's `invoice/cancel` give each refund a reference of its own. They all used one,

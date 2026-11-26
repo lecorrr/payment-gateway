@@ -1,0 +1,31 @@
+{{- $apps := list (dict "name" "gateway" "key" "gateway" "values" .Values.gateway)
+      (dict "name" "risk-service" "key" "riskService" "values" .Values.riskService) }}
+{{- range $apps }}
+{{- if .values.autoscaling.enabled }}
+{{- if gt (.values.autoscaling.minReplicas | int) (.values.autoscaling.maxReplicas | int) }}
+{{- fail (printf "%s.autoscaling.minReplicas is above maxReplicas" .key) }}
+{{- end }}
+---
+# Replicas by the CPU the pods use, as a share of what they request.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" .name) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .name }}
+  minReplicas: {{ .values.autoscaling.minReplicas }}
+  maxReplicas: {{ .values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .values.autoscaling.cpuPercent }}
+{{- end }}
+{{- end }}

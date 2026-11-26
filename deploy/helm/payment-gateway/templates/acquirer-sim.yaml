@@ -1,0 +1,3 @@
+{{- if .Values.acquirerSim.enabled }}
+{{ include "payment-gateway.acquirerSim" (dict "root" $ "name" "acquirer-sim" "host" .Values.ingress.hosts.acquirerSim "values" .Values.acquirerSim) }}
+{{- end }}

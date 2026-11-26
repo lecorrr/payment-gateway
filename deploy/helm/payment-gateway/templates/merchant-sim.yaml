@@ -1,0 +1,68 @@
+{{- if .Values.merchantSim.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: merchant-sim
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "merchant-sim") | nindent 4 }}
+spec:
+  replicas: 1
+  # The webhooks it received are in memory, so a new pod replaces the old one rather than running beside it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "merchant-sim") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "payment-gateway.labels" (dict "root" $ "name" "merchant-sim") | nindent 8 }}
+    spec:
+      {{- include "payment-gateway.podDefaults" . | nindent 6 }}
+      securityContext:
+        {{- include "payment-gateway.podSecurityContext" (dict "uid" 10001 "gid" 10001) | nindent 8 }}
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: merchant-sim
+          image: {{ include "payment-gateway.image" (dict "root" $ "name" "merchant-sim") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8092
+            - name: management
+              containerPort: 8081
+          env:
+            {{- include "payment-gateway.springEnv" . | nindent 12 }}
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "MERCHANT_SIM_WEBHOOK_SECRET" "key" "GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET") | nindent 12 }}
+            - name: MERCHANT_SIM_FAIL_FIRST
+              value: {{ .Values.merchantSim.failFirst | int | quote }}
+          {{- include "payment-gateway.springProbes" . | nindent 10 }}
+          {{- include "payment-gateway.springShutdown" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.merchantSim.resources | nindent 12 }}
+          securityContext:
+            {{- include "payment-gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: merchant-sim
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "merchant-sim") | nindent 4 }}
+spec:
+  selector:
+    {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "merchant-sim") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8092
+      targetPort: http
+    - name: management
+      port: 8081
+      targetPort: management
+{{- end }}

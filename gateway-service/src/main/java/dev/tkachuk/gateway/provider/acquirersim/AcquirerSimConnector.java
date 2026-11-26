@@ -13,6 +13,7 @@ import dev.tkachuk.gateway.provider.ProviderRefundResult;
 import dev.tkachuk.gateway.provider.ProviderResult;
 import dev.tkachuk.gateway.provider.RefundLookup;
 import dev.tkachuk.gateway.provider.RefundRequest;
+import java.util.List;
 import java.util.UUID;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -42,6 +43,7 @@ class AcquirerSimConnector implements ProviderConnector {
     private static final Logger log = LoggerFactory.getLogger(AcquirerSimConnector.class);
 
     private final RestClient restClient;
+    private final AcquirerSimProperties properties;
 
     AcquirerSimConnector(RestClient.Builder restClientBuilder, AcquirerSimProperties properties) {
         this.restClient = ProviderHttp.withTimeouts(restClientBuilder, properties.connectTimeout(),
@@ -49,11 +51,19 @@ class AcquirerSimConnector implements ProviderConnector {
                 .baseUrl(properties.baseUrl())
                 .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.apiKey())
                 .build();
+        this.properties = properties;
     }
 
     @Override
     public String name() {
         return NAME;
+    }
+
+    @Override
+    public List<String> missingSettings() {
+        return properties.isConfigured()
+                ? List.of()
+                : List.of("gateway.providers.acquirer-sim.api-key (ACQUIRER_SIM_API_KEY)");
     }
 
     @Override

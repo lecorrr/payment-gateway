@@ -1,0 +1,3 @@
+{{- if .Values.monobankSim.enabled }}
+{{ include "payment-gateway.acquirerSim" (dict "root" $ "name" "monobank-sim" "host" .Values.ingress.hosts.monobankSim "values" .Values.monobankSim) }}
+{{- end }}

@@ -1,0 +1,46 @@
+{{- $hosts := .Values.ingress.hosts }}
+{{- $routes := list (dict "host" $hosts.gateway "service" "gateway" "port" 8090) }}
+{{- if .Values.acquirerSim.enabled }}
+{{- $routes = append $routes (dict "host" $hosts.acquirerSim "service" "acquirer-sim" "port" 8091) }}
+{{- end }}
+{{- if .Values.monobankSim.enabled }}
+{{- $routes = append $routes (dict "host" $hosts.monobankSim "service" "monobank-sim" "port" 8091) }}
+{{- end }}
+{{- if .Values.merchantSim.enabled }}
+{{- $routes = append $routes (dict "host" $hosts.merchantSim "service" "merchant-sim" "port" 8092) }}
+{{- end }}
+# What browsers reach, each app at its own host: the gateway's API, the simulators' 3-D Secure pages and the demo
+# shop. Only the apps' HTTP ports are routed, never the management ports.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: payment-gateway
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "payment-gateway") | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tlsSecret }}
+  tls:
+    - secretName: {{ . }}
+      hosts:
+        {{- range $routes }}
+        - {{ .host }}
+        {{- end }}
+  {{- end }}
+  rules:
+    {{- range $routes }}
+    - host: {{ .host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .service }}
+                port:
+                  number: {{ .port }}
+    {{- end }}

@@ -1,0 +1,29 @@
+# staging, on the same k3d cluster in its own namespace, payment-gateway-staging, run the way production is: at least
+# two gateways and two risk-services spread over the nodes, scaled by their CPU, with disruption budgets. The
+# providers and the shop are still the simulators, and PostgreSQL and Redis are in the namespace. Browsers reach it at
+# http://*.staging.localhost:8280.
+ingress:
+  port: "8280"
+  hosts:
+    gateway: gateway.staging.localhost
+    acquirerSim: acquirer.staging.localhost
+    monobankSim: monobank.staging.localhost
+    merchantSim: shop.staging.localhost
+
+gateway:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+  podDisruptionBudget:
+    enabled: true
+
+riskService:
+  replicas: 2
+  # Short, so the gateways soon spread their calls over a risk-service pod that came up after them.
+  maxConnectionAge: 30s
+  podDisruptionBudget:
+    enabled: true
+
+postgres:
+  storage: 2Gi

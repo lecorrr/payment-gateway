@@ -1,0 +1,23 @@
+{{- if .Values.serviceMonitor.enabled }}
+# Every app's Service has a port named management with /actuator/prometheus; the job label is the app's name, as
+# in compose's Prometheus, so the dashboard in observability/ works with either.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payment-gateway
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "payment-gateway") | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/part-of: payment-gateway
+  endpoints:
+    - port: management
+      path: /actuator/prometheus
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

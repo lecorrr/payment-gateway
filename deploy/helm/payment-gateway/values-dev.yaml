@@ -1,0 +1,22 @@
+# dev, on the local k3d cluster of deploy/k3d, in the namespace payment-gateway-dev: one pod of every app, the
+# simulators as the providers and the shop, PostgreSQL and Redis in the namespace. Browsers reach it at
+# http://*.dev.localhost:8280, the port of the cluster's load balancer (deploy/k3d/cluster.yaml).
+ingress:
+  port: "8280"
+  hosts:
+    gateway: gateway.dev.localhost
+    acquirerSim: acquirer.dev.localhost
+    monobankSim: monobank.dev.localhost
+    merchantSim: shop.dev.localhost
+
+# A developer's machine: the gateway and risk-service ask for less than elsewhere, with the same limits.
+gateway:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+riskService:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi

@@ -1,0 +1,279 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+# Nothing reaches a pod of the namespace, and no pod reaches anything, unless a policy below allows it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "payment-gateway") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Every pod may look names up in the cluster's DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dns
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "payment-gateway") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# The gateway takes the API from the ingress controller, and monobank-sim's webhooks; it reaches its database,
+# Redis, risk-service, the simulators and the demo shop's webhook endpoint.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "gateway") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "gateway") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.ingressControllerPeer" . | nindent 8 }}
+        {{- if .Values.monobankSim.enabled }}
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "monobank-sim") | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: 8090
+    - from:
+        {{- include "payment-gateway.managementPeers" . | nindent 8 }}
+      ports:
+        - port: 8081
+  egress:
+    {{- if .Values.postgres.enabled }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "postgres") | nindent 8 }}
+      ports:
+        - port: 5432
+    {{- end }}
+    {{- if .Values.redis.enabled }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "redis") | nindent 8 }}
+      ports:
+        - port: 6379
+    {{- end }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "risk-service") | nindent 8 }}
+      ports:
+        - port: 9090
+    {{- if or .Values.acquirerSim.enabled .Values.monobankSim.enabled }}
+    - to:
+        {{- if .Values.acquirerSim.enabled }}
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "acquirer-sim") | nindent 8 }}
+        {{- end }}
+        {{- if .Values.monobankSim.enabled }}
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "monobank-sim") | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: 8091
+    {{- end }}
+    {{- if .Values.merchantSim.enabled }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "merchant-sim") | nindent 8 }}
+      ports:
+        - port: 8092
+    {{- end }}
+    {{- with $np.gatewayEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+# risk-service answers the gateways, and counts payments in Redis.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: risk-service
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "risk-service") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "risk-service") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "gateway") | nindent 8 }}
+      ports:
+        - port: 9090
+    - from:
+        {{- include "payment-gateway.managementPeers" . | nindent 8 }}
+      ports:
+        - port: 8094
+  {{- if or .Values.redis.enabled $np.riskServiceEgress }}
+  egress:
+    {{- if .Values.redis.enabled }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "redis") | nindent 8 }}
+      ports:
+        - port: 6379
+    {{- end }}
+    {{- with $np.riskServiceEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- $simulators := list (dict "name" "acquirer-sim" "enabled" .Values.acquirerSim.enabled)
+      (dict "name" "monobank-sim" "enabled" .Values.monobankSim.enabled) }}
+{{- range $simulators }}
+{{- if .enabled }}
+---
+# The simulator takes charges from the gateway, and browsers on its 3-D Secure pages; monobank-sim also sends the
+# gateway monobank-style webhooks.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" .name) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" .name) | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "gateway") | nindent 8 }}
+        {{- include "payment-gateway.ingressControllerPeer" $ | nindent 8 }}
+      ports:
+        - port: 8091
+    - from:
+        {{- include "payment-gateway.managementPeers" $ | nindent 8 }}
+      ports:
+        - port: 8081
+  {{- if eq .name "monobank-sim" }}
+  egress:
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "gateway") | nindent 8 }}
+      ports:
+        - port: 8090
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.merchantSim.enabled }}
+---
+# merchant-sim takes the gateway's webhooks, and browsers on its return page; it reaches nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: merchant-sim
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "merchant-sim") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "merchant-sim") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "gateway") | nindent 8 }}
+        {{- include "payment-gateway.ingressControllerPeer" . | nindent 8 }}
+      ports:
+        - port: 8092
+    - from:
+        {{- include "payment-gateway.managementPeers" . | nindent 8 }}
+      ports:
+        - port: 8081
+{{- end }}
+{{- if .Values.postgres.enabled }}
+---
+# PostgreSQL is the gateway's alone.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "postgres") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "postgres") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "gateway") | nindent 8 }}
+      ports:
+        - port: 5432
+{{- end }}
+{{- if .Values.redis.enabled }}
+---
+# Redis takes the gateways and risk-service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "redis") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "redis") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "gateway") | nindent 8 }}
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "risk-service") | nindent 8 }}
+      ports:
+        - port: 6379
+{{- end }}
+---
+# helm test's readiness check asks every app's management port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: readiness-test
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "readiness-test") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "readiness-test") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["gateway", "risk-service", "acquirer-sim", "monobank-sim", "merchant-sim"]
+      ports:
+        - port: 8081
+        - port: 8094
+{{- end }}

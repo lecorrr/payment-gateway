@@ -1,0 +1,23 @@
+{{- $apps := list (dict "name" "gateway" "key" "gateway" "values" .Values.gateway)
+      (dict "name" "risk-service" "key" "riskService" "values" .Values.riskService) }}
+{{- range $apps }}
+{{- if .values.podDisruptionBudget.enabled }}
+{{- $fewest := ternary .values.autoscaling.minReplicas .values.replicas .values.autoscaling.enabled | int }}
+{{- if le $fewest (.values.podDisruptionBudget.minAvailable | int) }}
+{{- fail (printf "%s.podDisruptionBudget.minAvailable must be below its fewest replicas (%d): a node with one of its pods could never be drained" .key $fewest) }}
+{{- end }}
+---
+# A node drained for maintenance gives up its pods only while this many stay ready elsewhere.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" .name) | nindent 4 }}
+spec:
+  minAvailable: {{ .values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" .name) | nindent 6 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,186 @@
+# One environment of payment-gateway, in a namespace of its own: one release per namespace, since the objects are
+# named after the apps (gateway, risk-service, postgres...), as in compose.yaml. These are the defaults; the files
+# next to this one hold what each environment changes: values-dev.yaml and values-staging.yaml for the k3d cluster
+# of deploy/k3d, values-prod.yaml for an example production cluster. values.schema.json checks every value.
+
+# The four apps' images: gateway-service, risk-service, acquirer-sim (also monobank-sim) and merchant-sim. With no
+# registry, the images are the ones loaded into the nodes, as deploy/k3d/deploy.sh does with k3d image import.
+image:
+  registry: ""
+  # Empty: the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The Secret with the keys and passwords. It is made outside the chart (by deploy/k3d/deploy.sh on k3d, by the
+# cluster's secret store in production), so no secret is ever in a values file, and it stays when the release is
+# uninstalled, as the database does. Its keys:
+#   GATEWAY_FINGERPRINT_KEY               always: the secret of the request fingerprints, 32+ characters
+#   DB_PASSWORD                           always: the gateway's database password, and the in-cluster PostgreSQL's
+#   ACQUIRER_SIM_API_KEY                  with the simulators: their key, which is the gateway's token at monobank-sim
+#   GATEWAY_MONOBANK_TOKEN                with the real monobank: the merchant's token
+#   GATEWAY_DEMO_MERCHANT_API_KEY         optional: without it there is no demo merchant
+#   GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET  with merchant-sim: the whsec_ secret of the demo merchant's webhooks
+existingSecret: payment-gateway
+
+# How browsers reach the apps: the Ingress, and the public URLs the apps send customers' browsers to (the 3-D Secure
+# pages and the way back to the gateway).
+ingress:
+  className: traefik
+  annotations: {}
+  # The Secret with the hosts' TLS certificate, which makes the URLs https; empty: plain http.
+  tlsSecret: ""
+  # The port browsers use when it is not the scheme's own, such as the k3d load balancer's; empty: 80 or 443.
+  port: ""
+  hosts:
+    gateway: gateway.localhost
+    acquirerSim: acquirer.localhost
+    monobankSim: monobank.localhost
+    merchantSim: shop.localhost
+
+gateway:
+  replicas: 1
+  # Where new payments go, the preferred provider first: acquirer-sim, monobank, or both in either order.
+  providers: monobank,acquirer-sim
+  # What a payment gets while risk-service can't answer: allow (it goes ahead unchecked) or decline (it fails).
+  riskWhenUnavailable: allow
+  # monobank's API. Empty: the monobank-sim of this release, or monobank's own address without the simulator.
+  monobankUrl: ""
+  # More settings, by their environment variable names, such as SPRING_DATA_REDIS_SSL_ENABLED: "true".
+  env: {}
+  # For each Java app: what it asks for, and a memory limit, 60 % of which the images give the heap
+  # (-XX:MaxRAMPercentage). No CPU limit, which would throttle the JVM; the autoscaler goes by the request.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 768Mi
+  # Replicas between the two by the CPU the gateways use; replicas above is then left to the autoscaler.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    cpuPercent: 70
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+riskService:
+  replicas: 1
+  # The longest a gateway keeps one connection: then it looks risk-service up again and spreads its calls over the
+  # pods there are now, new ones included (risk-service's spring.grpc.server.keepalive.connection.max-age).
+  maxConnectionAge: 1m
+  env: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      memory: 768Mi
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    cpuPercent: 70
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+# The simulated card acquirer, which the gateway charges through as acquirer-sim. Each simulator keeps its state in
+# memory, so it runs as one pod, replaced rather than rolled.
+acquirerSim:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 320Mi
+    limits:
+      memory: 768Mi
+
+# A second acquirer-sim, playing monobank: with it, the gateway's monobank is this simulator.
+monobankSim:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 320Mi
+    limits:
+      memory: 768Mi
+
+# The simulated shop: the demo merchant's webhooks go to it, and it has the page customers come back to.
+merchantSim:
+  enabled: true
+  # Deliveries of each webhook it answers 503 first, to show the gateway's retries.
+  failFirst: 0
+  resources:
+    requests:
+      cpu: 50m
+      memory: 320Mi
+    limits:
+      memory: 768Mi
+
+# PostgreSQL in the namespace, for an environment without a database of its own; its data stays in a volume claim
+# when the release is uninstalled. With enabled false, the gateway uses database.url.
+postgres:
+  enabled: true
+  # The same tag as compose.yaml and postgres.image in pom.xml.
+  image: postgres:17-alpine
+  storage: 1Gi
+  # Empty: the cluster's default storage class (local-path on k3d).
+  storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+database:
+  # With postgres.enabled false: the JDBC URL of the database, such as jdbc:postgresql://db.example.com:5432/gateway.
+  url: ""
+  username: gateway
+
+# Redis in the namespace: the gateways share their providers' open circuits through it, and risk-service counts
+# each card's payments in it. Nothing is kept on disk. With enabled false, the apps use host and port.
+redis:
+  enabled: true
+  # The same tag as compose.yaml and redis.image in pom.xml.
+  image: redis:8-alpine
+  host: ""
+  port: 6379
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# Where every app sends its traces over OTLP/HTTP, such as an OpenTelemetry Collector's
+# http://otel-collector.observability:4318/v1/traces; empty: none are sent.
+tracing:
+  otlpEndpoint: ""
+
+# A ServiceMonitor, for clusters whose Prometheus is run by the Prometheus Operator: it scrapes every app's
+# /actuator/prometheus on the management port, with the app's name as the job, as compose's Prometheus does.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  # Labels the Operator's Prometheus selects ServiceMonitors by, such as release: kube-prometheus-stack.
+  labels: {}
+
+# Nothing reaches a pod, and a pod reaches nothing, except what the apps need: the ingress controller the HTTP ports
+# browsers use, the gateway its database, Redis, risk-service and the simulators, monobank-sim the gateway's
+# webhooks, and so on (templates/network-policies.yaml). Every pod may look names up in the cluster's DNS.
+networkPolicy:
+  enabled: true
+  # The ingress controller's pods: Traefik in kube-system on k3s.
+  ingressController:
+    namespace: kube-system
+    podLabels:
+      app.kubernetes.io/name: traefik
+  # The namespace whose pods (Prometheus) may scrape the management ports; empty: none.
+  monitoringNamespace: ""
+  # Where else the gateway and risk-service may connect, such as monobank's API, a managed database or a collector:
+  # NetworkPolicy egress rules, used as they are.
+  gatewayEgress: []
+  riskServiceEgress: []

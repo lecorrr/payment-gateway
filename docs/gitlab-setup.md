@@ -94,3 +94,6 @@ the mirror and add it again.
   `true`, and the job log shows the service's own log.
 - **toomanyrequests** from Docker Hub: an image that Google's copy of Docker Hub lacks came from Docker Hub, which
   limits anonymous pulls per IP address, and GitLab's runners share theirs. Retry the job later.
+- **The chart job stops before its check**, at the download of Helm or kubeconform: a download that broke off, or a
+  file whose checksum isn't the published one (kubeconform's is pinned in `.gitlab-ci.yml`). Retry the job once;
+  a checksum that still doesn't match means the file is not the release it claims to be.
