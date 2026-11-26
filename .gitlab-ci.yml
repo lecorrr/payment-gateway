@@ -51,7 +51,7 @@ verify:
       - .m2/
   script:
     - ./mvnw $MAVEN_CLI_OPTS verify
-    - bash ci/print-coverage.sh gateway-service acquirer-sim merchant-sim
+    - bash ci/print-coverage.sh gateway-service risk-service acquirer-sim merchant-sim
   # The gateway's line coverage, shown on the pipeline and merge request pages.
   coverage: '/gateway-service line coverage: \d+\.\d+%/'
   artifacts:
@@ -59,6 +59,7 @@ verify:
     expire_in: 1 week
     paths:
       - gateway-service/target/gateway-service.jar
+      - risk-service/target/risk-service.jar
       - acquirer-sim/target/acquirer-sim.jar
       - merchant-sim/target/merchant-sim.jar
       - "*/target/site/jacoco/"
@@ -80,5 +81,6 @@ images:
       artifacts: true
   script:
     - docker build --tag "gateway-service:$CI_COMMIT_SHORT_SHA" gateway-service
+    - docker build --tag "risk-service:$CI_COMMIT_SHORT_SHA" risk-service
     - docker build --tag "acquirer-sim:$CI_COMMIT_SHORT_SHA" acquirer-sim
     - docker build --tag "merchant-sim:$CI_COMMIT_SHORT_SHA" merchant-sim

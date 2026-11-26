@@ -1,6 +1,6 @@
-# The gateway, two simulated providers, a simulated shop, PostgreSQL and Redis for a local demo. Ports are published
-# on localhost only. Build the jars first (./mvnw package) and make the .env file as the README shows: without it
-# compose won't start. A host port that is taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT,
+# The gateway, risk-service, two simulated providers, a simulated shop, PostgreSQL and Redis for a local demo. Ports
+# are published on localhost only. Build the jars first (./mvnw package) and make the .env file as the README shows:
+# without it compose won't start. A host port that is taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT,
 # MONOBANK_SIM_PORT, MERCHANT_SIM_PORT, GATEWAY_DB_PORT.
 name: payment-gateway
 
@@ -23,9 +23,20 @@ services:
       timeout: 3s
       retries: 12
 
-  # Shares open circuits between gateway instances. Only the gateway uses it, so no port is published.
+  # Open circuits shared between gateway instances, and risk-service's count of each card's payments. No port is
+  # published: only the services here use it.
   redis:
     image: redis:8-alpine   # the same tag as redis.image in pom.xml
+
+  # Asked by the gateway, over gRPC, whether a payment may go ahead. Only the gateway calls it.
+  risk-service:
+    build: ./risk-service
+    image: risk-service:local
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_started
 
   acquirer-sim:
     build: ./acquirer-sim
@@ -65,6 +76,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      risk-service:
+        condition: service_started
       acquirer-sim:
         condition: service_started
       monobank-sim:
@@ -74,6 +87,9 @@ services:
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/gateway
       REDIS_HOST: redis
+      RISK_SERVICE_TARGET: static://risk-service:9090
+      # allow: a payment risk-service can't check goes ahead; decline: it fails.
+      GATEWAY_RISK_WHEN_UNAVAILABLE: ${GATEWAY_RISK_WHEN_UNAVAILABLE:-allow}
       ACQUIRER_SIM_URL: http://acquirer-sim:8091
       ACQUIRER_SIM_API_KEY: ${ACQUIRER_SIM_API_KEY:?make the .env file first, see the README}
       GATEWAY_FINGERPRINT_KEY: ${GATEWAY_FINGERPRINT_KEY:?make the .env file first, see the README}

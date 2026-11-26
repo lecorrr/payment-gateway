@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+// What risk-service thinks of a card payment. gateway-service asks before it charges the card, and goes on only
+// when the answer is DECISION_ALLOW.
+package payment_gateway.risk.v1;
+
+option java_multiple_files = true;
+option java_package = "dev.tkachuk.risk.api";
+option java_outer_classname = "RiskProto";
+
+service RiskService {
+  // Whether the payment may go to a provider. Asking again with the same attempt_id counts the payment once.
+  rpc Assess(AssessRequest) returns (AssessResponse);
+}
+
+message AssessRequest {
+  // The same for every try of one payment request: the merchant's id and its Idempotency-Key.
+  string attempt_id = 1;
+  // The gateway's id of the payment, for the logs.
+  string payment_id = 2;
+  string merchant_id = 3;
+  // In minor units of the currency: 15000 with UAH is 150.00 UAH.
+  int64 amount = 4;
+  // ISO 4217 letters, such as UAH.
+  string currency = 5;
+  // A keyed hash of the card number: the same for every payment with the card, and never the number itself.
+  string card_token = 6;
+  // The first six digits of the card number.
+  string card_bin = 7;
+}
+
+message AssessResponse {
+  Decision decision = 1;
+  // Why the payment is declined: blocked_card_range, amount_over_limit or too_many_payments. Empty when allowed.
+  string reason = 2;
+}
+
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_ALLOW = 1;
+  DECISION_DECLINE = 2;
+}

@@ -14,6 +14,9 @@ import dev.tkachuk.gateway.provider.ProviderResult;
 import dev.tkachuk.gateway.provider.ProviderResult.Outcome;
 import dev.tkachuk.gateway.provider.ProviderRoute;
 import dev.tkachuk.gateway.provider.ProviderRouter;
+import dev.tkachuk.gateway.risk.RiskCheck;
+import dev.tkachuk.gateway.risk.RiskRequest;
+import dev.tkachuk.gateway.risk.RiskVerdict;
 import dev.tkachuk.gateway.webhook.WebhookOutbox;
 import java.net.URI;
 import java.time.Clock;
@@ -36,10 +39,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Card payments: one charge per Idempotency-Key, 3-D Secure challenges, and a background check for charges whose
- * outcome got lost or whose challenge was left unfinished. The provider is called outside any transaction; the
- * payment is stored as PROCESSING before the call, so a crash in between leaves a payment the checker finds, never
- * a charge the gateway doesn't know about. Every status change after that is stored together with its webhook event.
- * A new payment goes to the provider ProviderRouter picks, and on to the next while one turns out unavailable; each
+ * outcome got lost or whose challenge was left unfinished. A new payment is first checked by risk-service; one it
+ * declines is stored as DECLINED and never charged. The provider is called outside any transaction; the payment is
+ * stored as PROCESSING before the call, so a crash in between leaves a payment the checker finds, never a charge the
+ * gateway doesn't know about. Every status change after that is stored together with its webhook event. A new
+ * payment goes to the provider ProviderRouter picks, and on to the next while one turns out unavailable; each
  * payment is looked up with the provider that charged it.
  */
 @Service
@@ -51,18 +55,20 @@ public class PaymentService implements ChargeNotifications {
     private final RequestFingerprints fingerprints;
     private final ProviderConnectors providers;
     private final ProviderRouter router;
+    private final RiskCheck riskCheck;
     private final WebhookOutbox webhooks;
     private final TransactionTemplate transactions;
     private final PaymentProperties properties;
     private final Clock clock;
 
     PaymentService(PaymentRepository payments, RequestFingerprints fingerprints, ProviderConnectors providers,
-            ProviderRouter router, WebhookOutbox webhooks, PlatformTransactionManager transactionManager,
-            PaymentProperties properties, Clock clock) {
+            ProviderRouter router, RiskCheck riskCheck, WebhookOutbox webhooks,
+            PlatformTransactionManager transactionManager, PaymentProperties properties, Clock clock) {
         this.payments = payments;
         this.fingerprints = fingerprints;
         this.providers = providers;
         this.router = router;
+        this.riskCheck = riskCheck;
         this.webhooks = webhooks;
         this.transactions = new TransactionTemplate(transactionManager);
         this.properties = properties;
@@ -85,16 +91,23 @@ public class PaymentService implements ChargeNotifications {
         if (expiry.isExpiredOn(LocalDate.ofInstant(now, ZoneOffset.UTC))) {
             throw new GatewayException(ErrorCode.CARD_EXPIRED, "The card expired at the end of " + expiry);
         }
+        UUID paymentId = UUID.randomUUID();
+        CardNumber number = request.card().number();
+        // The same attempt for every try with this key, so risk-service counts a retry once.
+        RiskVerdict risk = riskCheck.check(new RiskRequest(merchantId + "/" + idempotencyKey, paymentId, merchantId,
+                request.amount(), request.currency(), fingerprints.cardToken(number), number.bin()));
+        if (risk != RiskVerdict.ALLOW) {
+            return refuse(newPayment(paymentId, merchantId, idempotencyKey, fingerprint, request,
+                    providers.ordered().getFirst().name(), now), risk);
+        }
+
         // The provider is picked before the payment is stored, so the payment names it from the start.
         Optional<ProviderRoute> route = router.next(Set.of());
         String provider = route.map(picked -> picked.provider().name())
                 .orElseGet(() -> providers.ordered().getFirst().name());
-        Payment payment = newPayment(merchantId, idempotencyKey, fingerprint, request, provider, now);
+        Payment payment = newPayment(paymentId, merchantId, idempotencyKey, fingerprint, request, provider, now);
         if (!insertIfAbsent(payment, route)) {
-            // A request with the same key was stored between the lookup above and this insert.
-            Payment first = payments.findByIdempotencyKey(merchantId, idempotencyKey).orElseThrow(
-                    () -> new IllegalStateException("Idempotency-Key " + idempotencyKey + " is taken, but not found"));
-            return replay(first, fingerprint);
+            return replayStoredMeanwhile(merchantId, idempotencyKey, fingerprint);
         }
         if (route.isEmpty()) {
             log.warn("Payment {} for order {} created, but every provider is failing", payment.id(),
@@ -214,6 +227,29 @@ public class PaymentService implements ChargeNotifications {
         }
     }
 
+    /**
+     * Stores a payment the risk check refused, already over: no provider sees it. It names the provider it would
+     * have gone to, as a payment no provider could take does.
+     */
+    private PaymentResult refuse(Payment payment, RiskVerdict risk) {
+        if (!payments.insertIfAbsent(payment)) {
+            return replayStoredMeanwhile(payment.merchantId(), payment.idempotencyKey(), payment.requestFingerprint());
+        }
+        if (risk == RiskVerdict.DECLINE) {
+            log.info("Payment {} for order {} declined by risk-service", payment.id(), payment.orderId());
+            return new PaymentResult(finish(payment, PaymentStatus.DECLINED, null, RiskVerdict.DECLINED_CODE), false);
+        }
+        log.warn("Payment {} for order {} failed: risk-service could not check it", payment.id(), payment.orderId());
+        return new PaymentResult(finish(payment, PaymentStatus.FAILED, null, RiskVerdict.UNAVAILABLE_CODE), false);
+    }
+
+    // A request with the same key was stored between the lookup at the start of create and this one's insert.
+    private PaymentResult replayStoredMeanwhile(UUID merchantId, String idempotencyKey, String fingerprint) {
+        Payment first = payments.findByIdempotencyKey(merchantId, idempotencyKey).orElseThrow(
+                () -> new IllegalStateException("Idempotency-Key " + idempotencyKey + " is taken, but not found"));
+        return replay(first, fingerprint);
+    }
+
     // A route's permit must go back to its circuit unless the provider is called.
     private boolean insertIfAbsent(Payment payment, Optional<ProviderRoute> route) {
         boolean inserted;
@@ -229,11 +265,11 @@ public class PaymentService implements ChargeNotifications {
         return inserted;
     }
 
-    private Payment newPayment(UUID merchantId, String idempotencyKey, String fingerprint, NewPayment request,
-            String provider, Instant now) {
+    private Payment newPayment(UUID paymentId, UUID merchantId, String idempotencyKey, String fingerprint,
+            NewPayment request, String provider, Instant now) {
         CardNumber number = request.card().number();
         String returnUrl = request.returnUrl() == null ? null : request.returnUrl().toString();
-        return new Payment(UUID.randomUUID(), merchantId, idempotencyKey, fingerprint, request.orderId(),
+        return new Payment(paymentId, merchantId, idempotencyKey, fingerprint, request.orderId(),
                 request.amount(), request.currency(), request.description(), returnUrl, PaymentStatus.PROCESSING,
                 number.brand(), number.bin(), number.last4(), provider, null, null, null,
                 now.plus(properties.firstCheckAfter()), now, now);

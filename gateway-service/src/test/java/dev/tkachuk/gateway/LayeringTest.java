@@ -29,7 +29,8 @@ class LayeringTest {
             "webhook", Set.of("common"),
             "merchant", Set.of("common", "webhook"),
             "provider", Set.of("common", "card"),
-            "payment", Set.of("common", "card", "merchant", "provider", "webhook", "api"));
+            "risk", Set.of("common"),
+            "payment", Set.of("common", "card", "merchant", "provider", "risk", "webhook", "api"));
 
     private static List<SourceFile> sources;
 
@@ -90,6 +91,19 @@ class LayeringTest {
                         .filter(matcher -> !source.packageName().startsWith(
                                 BASE_PACKAGE + "provider." + matcher.group(1)))
                         .map(matcher -> source.path() + " imports " + matcher.group()))
+                .toList();
+
+        assertThat(violations).isEmpty();
+    }
+
+    // Only the risk module speaks gRPC to risk-service; the rest of the gateway goes through RiskCheck.
+    @Test
+    void shouldUseRiskServiceContractOnlyInRisk() {
+        List<String> violations = sources.stream()
+                .filter(source -> !source.module().equals("risk"))
+                .flatMap(source -> source.imports().stream()
+                        .filter(name -> name.startsWith("dev.tkachuk.risk.api."))
+                        .map(name -> source.path() + " imports " + name))
                 .toList();
 
         assertThat(violations).isEmpty();

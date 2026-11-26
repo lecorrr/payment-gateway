@@ -1,8 +1,10 @@
 package dev.tkachuk.gateway.payment;
 
 import dev.tkachuk.gateway.card.Card;
+import dev.tkachuk.gateway.card.CardNumber;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.util.Base64;
 import java.util.HexFormat;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -10,9 +12,10 @@ import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Component;
 
 /**
- * A keyed hash (HMAC-SHA256) of everything a payment request says except the CVC. Stored with the payment, it tells
- * a retry from a different request sent with the same Idempotency-Key without storing the card number; PCI DSS
- * allows keyed hashes of the whole PAN. The CVC stays out: it must not be kept in any form.
+ * Keyed hashes (HMAC-SHA256); PCI DSS allows them of the whole PAN. The fingerprint covers everything a payment
+ * request says except the CVC: stored with the payment, it tells a retry from a different request sent with the same
+ * Idempotency-Key without storing the card number. The CVC stays out: it must not be kept in any form. The card token
+ * covers the card number alone, so risk-service can count a card's payments without ever seeing the number.
  */
 @Component
 class RequestFingerprints {
@@ -42,6 +45,13 @@ class RequestFingerprints {
         }
         byte[] hash = newMac().doFinal(input.toString().getBytes(StandardCharsets.UTF_8));
         return HexFormat.of().formatHex(hash);
+    }
+
+    /** The same for every payment with the card; Base64url, 43 characters. */
+    String cardToken(CardNumber number) {
+        // A fingerprint's input starts with a length or "-", so no card token is ever a request's fingerprint.
+        byte[] hash = newMac().doFinal(("card-token;" + number.digits()).getBytes(StandardCharsets.UTF_8));
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(hash);
     }
 
     // Each value as its length and the value, so no two different requests give the same input; "-" for none.

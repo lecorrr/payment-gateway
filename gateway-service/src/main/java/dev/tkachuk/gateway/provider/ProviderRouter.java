@@ -1,12 +1,12 @@
 package dev.tkachuk.gateway.provider;
 
+import dev.tkachuk.gateway.common.Durations;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker.StateTransition;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -75,7 +75,8 @@ public class ProviderRouter {
             case OPEN -> {
                 CircuitBreaker.Metrics metrics = circuit.getMetrics();
                 log.warn("{} is failing ({}% of its last {} charges): new payments skip it for {}", provider,
-                        Math.round(metrics.getFailureRate()), metrics.getNumberOfBufferedCalls(), readable(openFor));
+                        Math.round(metrics.getFailureRate()), metrics.getNumberOfBufferedCalls(),
+                        Durations.readable(openFor));
                 sharedCircuits.markOpen(provider, openFor);
             }
             case HALF_OPEN -> log.info("{} gets a few charges again, to see whether it is back", provider);
@@ -87,10 +88,5 @@ public class ProviderRouter {
                 // The other states are set by hand; the gateway never does.
             }
         }
-    }
-
-    // PT30S as 30s, as application.yml writes it.
-    private static String readable(Duration duration) {
-        return duration.toString().substring(2).toLowerCase(Locale.ROOT);
     }
 }

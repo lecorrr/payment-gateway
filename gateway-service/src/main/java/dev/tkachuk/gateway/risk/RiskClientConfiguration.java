@@ -1,0 +1,42 @@
+package dev.tkachuk.gateway.risk;
+
+import dev.tkachuk.risk.api.RiskServiceGrpc;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig.SlidingWindowType;
+import java.time.Clock;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.grpc.client.GrpcChannelFactory;
+
+/** The client of risk-service, and the circuit breaker in front of it. */
+@Configuration(proxyBeanMethods = false)
+class RiskClientConfiguration {
+
+    // risk-service counts as failing once half of its last ten answers, at least five of them, were errors or late.
+    private static final int WINDOW_SIZE = 10;
+    private static final int MINIMUM_CALLS = 5;
+    private static final int FAILURE_RATE_PERCENT = 50;
+    private static final int TRIAL_CALLS = 2;
+
+    /** Over the channel named risk: where it goes is spring.grpc.client.channel.risk.target. */
+    @Bean
+    RiskServiceGrpc.RiskServiceBlockingStub riskServiceStub(GrpcChannelFactory channels) {
+        return RiskServiceGrpc.newBlockingStub(channels.createChannel("risk"));
+    }
+
+    @Bean
+    CircuitBreaker riskServiceCircuit(RiskProperties properties, Clock clock) {
+        CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+                .slidingWindowType(SlidingWindowType.COUNT_BASED)
+                .slidingWindowSize(WINDOW_SIZE)
+                .minimumNumberOfCalls(MINIMUM_CALLS)
+                .failureRateThreshold(FAILURE_RATE_PERCENT)
+                .waitDurationInOpenState(properties.openFor())
+                .permittedNumberOfCallsInHalfOpenState(TRIAL_CALLS)
+                .maxWaitDurationInHalfOpenState(properties.openFor())
+                .clock(clock)
+                .build();
+        return CircuitBreaker.of("risk-service", config);
+    }
+}

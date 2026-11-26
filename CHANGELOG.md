@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0 (2026-11-26)
+
+- risk-service, a new app the gateway asks over gRPC before every charge (risk-api holds the contract,
+  `risk.proto`). It declines a card from a blocked range, an amount over its currency's limit, and a card's
+  eleventh payment within ten minutes, counted in Redis once per Idempotency-Key.
+- A payment risk-service declines is `DECLINED` with `risk_declined`, and no provider sees it. risk-service gets a
+  keyed hash of the card number, never the number.
+- When risk-service doesn't answer within 300 ms or is down, payments go ahead by default and the log says so;
+  `GATEWAY_RISK_WHEN_UNAVAILABLE=decline` fails them with `risk_unavailable` instead. A circuit breaker stops
+  payments waiting for a risk-service that keeps failing.
+- The API contract (0.5.0) names the two new codes.
+- compose runs risk-service, and the pipeline builds its image.
+- acquirer-sim's webhook test answers each webhook before the test can stop its receiver, so no false "not
+  delivered" warning is logged.
+
 ## 0.4.0 (2026-11-26)
 
 - Failover: `GATEWAY_PROVIDERS` lists the providers new payments go to, the preferred one first, and replaces

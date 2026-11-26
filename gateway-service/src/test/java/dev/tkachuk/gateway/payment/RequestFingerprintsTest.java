@@ -94,4 +94,26 @@ class RequestFingerprintsTest {
 
         assertThat(otherKey.of(request())).isNotEqualTo(fingerprints.of(request()));
     }
+
+    // risk-service counts a card's payments by its token, whatever else the payments say.
+    @Test
+    void shouldGiveCardSameTokenInEveryPayment() {
+        String token = fingerprints.cardToken(card("4111111111111111", 12, 2030, "123", null).number());
+
+        assertThat(fingerprints.cardToken(card("4111111111111111", 1, 2031, "999", "OLENA KOVALENKO").number()))
+                .isEqualTo(token)
+                .hasSize(43)
+                .matches("[A-Za-z0-9_-]+");
+        assertThat(fingerprints.cardToken(card("5555555555554444", 12, 2030, "123", null).number()))
+                .isNotEqualTo(token);
+    }
+
+    @Test
+    void shouldMakeCardTokenWithKey() {
+        RequestFingerprints otherKey = new RequestFingerprints(new PaymentProperties(
+                "another-fingerprint-key-0123456789ab", TestPayments.PUBLIC_URL, Duration.ofSeconds(30),
+                Duration.ofSeconds(10), Duration.ofMinutes(1), Duration.ofMinutes(10), 20));
+
+        assertThat(otherKey.cardToken(card().number())).isNotEqualTo(fingerprints.cardToken(card().number()));
+    }
 }

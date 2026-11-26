@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: risk-service
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Well inside the gateway's deadline for an answer (300ms), so a slow Redis can't leave it without one.
+      connect-timeout: 100ms
+      timeout: 100ms
+  grpc:
+    server:
+      port: ${RISK_SERVICE_PORT:9090}
+
+risk:
+  velocity:
+    max-payments: 10
+    window: 10m
+  # The most one payment may be, in minor units; a currency not listed has no limit.
+  amount-limits:
+    UAH: 10000000   # 100 000.00 UAH
+    USD: 300000     # 3 000.00 USD
+    EUR: 300000     # 3 000.00 EUR
+  # The first six digits of card numbers that no payment is allowed from. 400009 is the test range in the README.
+  blocked-bins:
+    - "400009"

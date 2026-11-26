@@ -3,11 +3,12 @@
 [![pipeline](https://gitlab.com/lecorrr/payment-gateway/badges/main/pipeline.svg)](https://gitlab.com/lecorrr/payment-gateway/-/pipelines?ref=main)
 [![gateway-service coverage](https://gitlab.com/lecorrr/payment-gateway/badges/main/coverage.svg?job=verify&key_text=gateway+coverage&key_width=110)](https://gitlab.com/lecorrr/payment-gateway/-/pipelines?ref=main)
 
-A card payment gateway for merchants. A merchant sends a card payment to one REST API; the gateway charges it with
-a payment provider, records the outcome, tells the merchant by a signed webhook, and never stores the card number.
-It has two providers, **acquirer-sim**, a simulated card acquirer, and **monobank**'s acquiring API, and moves new
-payments to the other one when a provider is down. acquirer-sim, which can also play monobank, and **merchant-sim**,
-which plays the shop, live in this repository, so everything runs locally.
+A card payment gateway for merchants. A merchant sends a card payment to one REST API; the gateway asks
+**risk-service** over gRPC whether the payment may go ahead, charges it with a payment provider, records the outcome,
+tells the merchant by a signed webhook, and never stores the card number. It has two providers, **acquirer-sim**, a
+simulated card acquirer, and **monobank**'s acquiring API, and moves new payments to the other one when a provider
+is down. risk-service, acquirer-sim, which can also play monobank, and **merchant-sim**, which plays the shop, live
+in this repository, so everything runs locally.
 
 What it does:
 
@@ -25,6 +26,10 @@ What it does:
   challenges left unfinished. Several instances can run it side by side (`FOR UPDATE SKIP LOCKED`).
 - **Tells "not charged" from "don't know".** A refused request or a connection that never opened fails the payment;
   a 5xx, a read timeout or a dropped connection leaves it `PROCESSING` for the checker.
+- **Risk check over gRPC.** Before any provider sees a payment, risk-service checks it: a blocked card range, an
+  amount over its currency's limit, too many payments with one card lately (counted in Redis, once per
+  Idempotency-Key). It gets a keyed hash of the card number, never the number. When risk-service is slow (a 300 ms
+  deadline) or down, payments go ahead by default, and a circuit breaker stops them waiting for it.
 - **One API, several providers.** Each provider sits behind a connector that turns its API, its statuses and its
   error codes into the gateway's, so a merchant sees the same decline codes whichever provider charged the card.
   Every payment is looked up with the provider that charged it.
@@ -39,8 +44,9 @@ What it does:
 
 ## Stack
 
-Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis), PostgreSQL 17, Redis 8,
-Resilience4j, OpenAPI Generator, springdoc, JUnit 5, WireMock, Testcontainers, JaCoCo, Docker, GitLab CI.
+Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis, gRPC), Protocol Buffers,
+PostgreSQL 17, Redis 8, Resilience4j, OpenAPI Generator, springdoc, JUnit 5, WireMock, Testcontainers, JaCoCo,
+Docker, GitLab CI.
 
 ## Run it
 
@@ -66,7 +72,7 @@ Needs Java 21 and Docker.
    printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nMONOBANK_SIM_PORT=8193\nMERCHANT_SIM_PORT=8192\nGATEWAY_DB_PORT=5446\n' >> .env
    ```
 
-3. Start the gateway, both simulated providers, merchant-sim, PostgreSQL and Redis:
+3. Start the gateway, risk-service, both simulated providers, merchant-sim, PostgreSQL and Redis:
 
    ```bash
    docker compose up -d --build
@@ -127,6 +133,21 @@ Needs Java 21 and Docker.
    It comes back with a new signing key, so for up to 10 minutes the gateway refuses its webhooks, as after a key
    change at monobank; the payments don't depend on them.
 
+8. Pay with a card from the range risk-service blocks: `DECLINED` with `risk_declined`, and no provider saw it:
+
+   ```bash
+   curl -s -w '\n' -X POST http://localhost:8090/api/v1/payments -H "X-Api-Key: $KEY" -H "Idempotency-Key: order-1003-1" -H "Content-Type: application/json" -d '{"orderId": "ORDER-1003", "amount": 15000, "currency": "UAH", "card": {"number": "4000 0900 0000 0003", "expiryMonth": 12, "expiryYear": 2030, "cvc": "123"}}'
+   ```
+
+   Then take risk-service away, and payments go ahead unchecked; `docker compose logs gateway` says so for each:
+
+   ```bash
+   docker compose stop risk-service
+   ```
+
+   `docker compose start risk-service` brings it back; within 30 s, once its circuit lets payments through again,
+   they are checked again.
+
 The API docs are at http://localhost:8090/swagger-ui.html (use **Authorize** with the key), acquirer-sim's, the
 monobank-style part included, at http://localhost:8091/swagger-ui.html. Stop everything with `docker compose down`.
 
@@ -141,8 +162,11 @@ monobank-style part included, at http://localhost:8091/swagger-ui.html. Stop eve
 | 4000 0000 0000 0119 | `DECLINED`, `processing_error`                                                            |
 | 4000 0000 0000 0259 | The answer comes too late: `PROCESSING`, then `SUCCEEDED` about 30 s later by lookup      |
 | 4000 0000 0000 3220 | `REQUIRES_ACTION`; passing the challenge `SUCCEEDED`, failing it `authentication_failed`  |
+| 4000 0900 0000 0003 | `DECLINED`, `risk_declined`: risk-service blocks the card range 400009                    |
 
-CVC `000` is declined with `incorrect_cvc`. A challenge left open for 15 minutes is declined with
+risk-service also declines, with `risk_declined`, a payment over 100 000.00 UAH (3 000.00 USD or EUR), and a card's
+eleventh payment within ten minutes; retries with the same Idempotency-Key count once. CVC `000` is declined with
+`incorrect_cvc`. A challenge left open for 15 minutes is declined with
 `authentication_expired`. A past expiry date or a number that fails the Luhn check is refused by the gateway itself
 (422 `CARD_EXPIRED`, `CARD_INVALID`) before any provider sees it.
 
@@ -225,7 +249,10 @@ certificate, so whether a token may use it is monobank's call; a refused request
 ## Layout
 
 ```
-gateway-service/   the merchant API, 3-D Secure return, webhooks, the acquirer-sim and monobank connectors
+gateway-service/   the merchant API, 3-D Secure return, webhooks, the risk check, the acquirer-sim and monobank
+                   connectors
+risk-service/      decides over gRPC whether a payment may go ahead; counts cards' payments in Redis
+risk-api/          the gRPC contract between the two (risk.proto) and the Java code generated from it
 acquirer-sim/      the simulated card acquirer with its challenge pages, a separate app with its own API and a
                    monobank-style one
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
@@ -244,4 +271,4 @@ other modules' too.
 
 ## Next
 
-A risk check over gRPC before each charge; refunds; metrics and tracing; a Helm chart for several environments.
+Refunds; metrics and tracing; a Helm chart for several environments.

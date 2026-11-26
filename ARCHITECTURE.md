@@ -1,13 +1,16 @@
 # Architecture
 
-Three Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments, and
-charges cards with acquirer-sim and with monobank's acquiring API, moving a payment on to the other one when a
-provider can't take it; **acquirer-sim** plays a card acquirer behind it, with its own API, error format and naming
-(snake_case), the way a real provider would, and under `/api/merchant` the part of monobank's API the gateway uses,
-so a second copy of it can play monobank; **merchant-sim** plays a shop in front of it, taking the gateway's
-webhooks and the customer's return from 3-D Secure. The three share no code: merchant-sim checks webhook signatures
-with its own code, and a test in each app checks the same published signature example, so the two sides can't drift
-apart.
+Four Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments: it asks
+risk-service about each new payment, and charges cards with acquirer-sim and with monobank's acquiring API, moving a
+payment on to the other one when a provider can't take it. **risk-service** decides, over gRPC, whether a payment
+may go ahead, and keeps nothing but each card's recent payments in Redis. **acquirer-sim** plays a card acquirer
+behind the gateway, with its own API, error format and naming (snake_case), the way a real provider would, and under
+`/api/merchant` the part of monobank's API the gateway uses, so a second copy of it can play monobank;
+**merchant-sim** plays a shop in front of it, taking the gateway's webhooks and the customer's return from 3-D
+Secure. **risk-api** is no app: it holds the gRPC contract, risk.proto, and the Java code generated from it, which
+the gateway and risk-service both build on. Apart from that contract the apps share no code: merchant-sim checks
+webhook signatures with its own code, and a test in each app checks the same published signature example, so the two
+sides can't drift apart.
 
 ## Modules of gateway-service
 
@@ -18,13 +21,15 @@ apart.
 | `webhook`  | merchants' webhook endpoints and secrets, the outbox, signing, the dispatcher           | common                         |
 | `merchant` | merchants, the API key filter, the current merchant, the demo merchant                  | common, webhook                |
 | `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ChargeLookup`, `ProviderResult`), the connectors by name, the routing between them (`ProviderRouter`), `ChargeNotifications`; one package per provider below it (`acquirersim`, `monobank`) | common, card |
-| `payment`  | the API controller, `PaymentService`, the payments table, fingerprints, the checker, the 3-D Secure return | common, card, merchant, provider, webhook, api |
+| `risk`     | the client of risk-service (`RiskCheck`, `RiskVerdict`) and the circuit breaker in front of it | common                         |
+| `payment`  | the API controller, `PaymentService`, the payments table, fingerprints and card tokens, the checker, the 3-D Secure return | common, card, merchant, provider, risk, webhook, api |
 
 `api` is the interface and DTOs generated from
 [payment-gateway.yaml](gateway-service/src/main/resources/static/openapi/payment-gateway.yaml), the webhook body
-included. `LayeringTest` checks the table on every build, and also that `card` imports no Spring or Jakarta classes
-and that no module imports a provider's package: Spring wires the connector in, so a new provider touches nothing
-else. `webhook` knows nothing of payments: it stores and sends whatever JSON body `payment` gives it.
+included. `LayeringTest` checks the table on every build, and also that `card` imports no Spring or Jakarta classes,
+that no module imports a provider's package (Spring wires the connector in, so a new provider touches nothing else),
+and that only `risk` imports the gRPC contract. `webhook` knows nothing of payments: it stores and sends whatever
+JSON body `payment` gives it.
 
 ## A payment, step by step
 
@@ -37,9 +42,13 @@ else. `webhook` knows nothing of payments: it stores and sends whatever JSON bod
 3. `PaymentService` computes the request fingerprint. A payment with this `Idempotency-Key` already there is
    returned as a replay if the fingerprints match, or refused with 422 `IDEMPOTENCY_KEY_REUSED`. An expired card is
    422 `CARD_EXPIRED`. Requests refused here store nothing, so the key can be used again.
-4. The payment is inserted as `PROCESSING` with its first check due (`INSERT ... ON CONFLICT DO NOTHING`; losing a
+4. `RiskCheck` asks risk-service about the payment (see risk-service below). A payment it declines is stored as
+   `DECLINED` with `risk_declined` and never charged; with `gateway.risk.when-unavailable=decline`, one it can't
+   check is stored as `FAILED` with `risk_unavailable`. Either names the first provider of the order, as a payment
+   no provider could take does.
+5. The payment is inserted as `PROCESSING` with its first check due (`INSERT ... ON CONFLICT DO NOTHING`; losing a
    race with a parallel request turns into a replay of the winner's payment).
-5. The provider the router picks (see Routing) is called outside any transaction, with the payment's id as the
+6. The provider the router picks (see Routing) is called outside any transaction, with the payment's id as the
    reference and the gateway's `/3ds/return/{id}` as the return URL; the payment keeps the provider's name. What
    came back decides the status:
 
@@ -56,7 +65,7 @@ else. `webhook` knows nothing of payments: it stores and sends whatever JSON bod
    `provider_unavailable` means the provider never got the charge, so the payment first goes to the next provider,
    and fails only when none is left.
 
-6. The change is written with `UPDATE ... WHERE status IN ('PROCESSING', 'REQUIRES_ACTION')` (only `PROCESSING` for
+7. The change is written with `UPDATE ... WHERE status IN ('PROCESSING', 'REQUIRES_ACTION')` (only `PROCESSING` for
    the move to `REQUIRES_ACTION`), in one transaction with its webhook event. Whichever of the request, the checker,
    the customer's return and a provider's webhook writes a change first, that one stands, and only it gets an event.
 
@@ -95,6 +104,31 @@ Instances share open circuits through Redis. When a circuit opens, the provider 
 own against it first; the mark goes when the circuit closes. Redis is optional: when it can't be reached, each
 instance goes by its own circuits, says so once in its log, and asks Redis again after 30 s, so Redis being down
 costs payments at most its 500 ms timeout once every 30 s, and never fails one.
+
+## risk-service
+
+The gateway's `RiskCheck` calls `RiskService.Assess` of [risk.proto](risk-api/src/main/proto/risk/v1/risk.proto)
+with a deadline of `gateway.risk.deadline` (300 ms). It sends the payment's id, the merchant, the amount and
+currency, the first six digits of the card number, and the card token: an HMAC-SHA256 of the card number with the
+fingerprint key, the same for every payment with the card, from which the number can't be worked back. The attempt
+id, the merchant's id and its Idempotency-Key, is the same for every try of one request.
+
+risk-service applies three rules, in order: a card range in `risk.blocked-bins` (400009 for the demo); an amount
+over `risk.amount-limits` for its currency (100 000.00 UAH, 3 000.00 USD or EUR); and more than
+`risk.velocity.max-payments` (10) payments with the card within `risk.velocity.window` (10 minutes). The last is
+counted in Redis, in a sorted set per card holding each attempt once, scored by when it was first counted. One Lua
+script drops the attempts older than the window, adds this one unless it is there, keeps the set for a window more
+and counts, so every instance of risk-service counts alike and a retry counts once. Every payment is counted,
+declined ones too. When Redis can't be reached, the velocity rule is left out (logged once, and Redis is asked again
+after 30 s) while the other two still apply; Redis's timeouts (100 ms) are well inside the gateway's deadline. A
+request that is no payment the rules can judge is refused with `INVALID_ARGUMENT`, naming the field.
+
+What the gateway does without an answer (an error, the deadline, an answer without a decision) is
+`gateway.risk.when-unavailable`: `allow`, the default, lets the payment go ahead unchecked, with a warning in the
+log; `decline` fails it with `risk_unavailable`. A circuit breaker counts risk-service's last ten answers: once at
+least five came and half of them were errors or late, payments stop waiting for it for `gateway.risk.open-for` (30
+s), and then two trial calls decide whether it is back. The channel is plaintext inside the compose network;
+`spring.grpc.client.channel.risk.ssl` turns TLS on.
 
 ## 3-D Secure
 
@@ -202,6 +236,14 @@ always looked up with the provider that charged it, so changing the order leaves
 - **Open circuits shared through Redis, but each instance decides alone.** Sharing spares the other instances from
   failing payments' first tries against a provider known to be down; keeping the circuits themselves in each
   instance means that Redis going away loses only that.
+- **gRPC between the gateway and risk-service.** An internal call on every payment, with a schema both sides
+  compile against, a deadline that travels with the call, and HTTP/2 connections that stay open; Spring Boot 4.1
+  has the client and the server built in.
+- **A payment risk-service can't check goes ahead, by default.** A risk check that is down shouldn't take card
+  payments down with it; each such payment is logged, and `decline` is there for a merchant who'd rather lose the
+  sale.
+- **risk-service sees a card token, not the card.** It only needs to know the same card again, so it gets an HMAC
+  of the number with a key it doesn't have, and never handles card data.
 - **An outbox, not a webhook call in the request.** Sending from the request would either hold a transaction open
   over an HTTP call or lose the event on a crash between commit and send.
 - **Standard Webhooks** for signing, rather than a scheme of the gateway's own: merchants can check signatures
@@ -229,6 +271,14 @@ always looked up with the provider that charged it, so changing the order leaves
 | `GATEWAY_PROVIDERS`                             | acquirer-sim            | the providers new payments go to, the preferred one first  |
 | `REDIS_HOST`, `REDIS_PORT`                      | localhost, 6379         | Redis, to share open circuits between instances; optional  |
 | `gateway.providers.circuit-breaker.open-for`    | 30s                     | how long a failing provider is skipped; Routing has the rest |
+| `RISK_SERVICE_TARGET`                           | static://localhost:9090 | where risk-service is: `spring.grpc.client.channel.risk.target` |
+| `GATEWAY_RISK_ENABLED`                          | true                    | whether new payments are checked by risk-service           |
+| `GATEWAY_RISK_WHEN_UNAVAILABLE`                 | allow                   | allow or decline a payment risk-service can't check        |
+| `gateway.risk.deadline`, `gateway.risk.open-for` | 300ms, 30s             | how long an answer may take; how long a failing risk-service is left alone |
+| `RISK_SERVICE_PORT`                             | 9090                    | risk-service's gRPC port                                   |
+| `risk.velocity.max-payments`, `.window`         | 10, 10m                 | risk-service: the payments one card may make in the window |
+| `risk.amount-limits`                            | UAH 10000000, USD and EUR 300000 | risk-service: the most one payment may be, in minor units |
+| `risk.blocked-bins`                             | 400009                  | risk-service: the card ranges it declines                  |
 | `GATEWAY_MONOBANK_TOKEN`                        | empty: not configured   | the merchant's monobank token (X-Token); a test token works |
 | `GATEWAY_MONOBANK_WEBHOOK_URL`                  | empty: no webhooks      | this gateway's `/providers/monobank/webhooks`, as monobank reaches it |
 | `MONOBANK_URL`                                  | https://api.monobank.ua | where monobank's API is                                    |

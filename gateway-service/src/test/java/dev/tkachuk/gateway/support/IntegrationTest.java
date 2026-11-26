@@ -15,6 +15,7 @@ import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.grpc.test.autoconfigure.AutoConfigureTestGrpcTransport;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
@@ -30,9 +31,10 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
  * merchant's webhook endpoint, and short timings: the providers time out after 700 ms, a payment is first looked up
  * after 1 s and given up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms
  * apart. New payments go to acquirer-sim, and to monobank when acquirer-sim is unavailable; a provider's circuit
- * opens for 10 s once half of its last charges (at least 2, at most 4) failed. All integration tests share this one
+ * opens for 10 s once half of its last charges (at least 2, at most 4) failed. risk-service is FakeRiskService, over
+ * in-process gRPC, and allows every payment until a test says otherwise. All integration tests share this one
  * context, so they share its containers too. Every test starts with no payments, no webhook events, only the demo
- * merchant, which has no webhook endpoint, and every circuit closed.
+ * merchant, which has no webhook endpoint, a risk-service that allows everything, and every circuit closed.
  */
 @SpringBootTest(properties = {
         "gateway.demo-merchant.api-key=" + IntegrationTest.DEMO_API_KEY,
@@ -59,8 +61,9 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
         "gateway.webhooks.read-timeout=1s",
         "gateway.webhooks.retry-delays=200ms,200ms"})
 @AutoConfigureMockMvc
+@AutoConfigureTestGrpcTransport
 @Import({PostgresTestcontainer.class, RedisTestcontainer.class, AcquirerStub.class, MonobankStub.class,
-        MerchantEndpointStub.class})
+        MerchantEndpointStub.class, FakeRiskService.class})
 public abstract class IntegrationTest {
 
     protected static final String DEMO_API_KEY = "test-demo-merchant-key-0123456789";
@@ -93,6 +96,13 @@ public abstract class IntegrationTest {
     @Autowired
     protected StringRedisTemplate redis;
 
+    @Autowired
+    protected FakeRiskService riskService;
+
+    @Autowired
+    @Qualifier("riskServiceCircuit")
+    protected CircuitBreaker riskServiceCircuit;
+
     // The tables first, so the checker and the dispatcher have nothing left to send by the time the stubs are reset.
     // Circuits before Redis: a circuit that closes removes its mark there.
     @BeforeEach
@@ -103,7 +113,9 @@ public abstract class IntegrationTest {
         acquirer.resetAll();
         monobank.resetAll();
         merchantEndpoint.resetAll();
+        riskService.reset();
         circuitBreakers.getAllCircuitBreakers().forEach(CircuitBreaker::reset);
+        riskServiceCircuit.reset();
         Set<String> keys = redis.keys("*");
         if (keys != null && !keys.isEmpty()) {
             redis.delete(keys);

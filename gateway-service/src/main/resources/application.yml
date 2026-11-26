@@ -17,6 +17,12 @@ spring:
       port: ${REDIS_PORT:6379}
       connect-timeout: 500ms
       timeout: 500ms
+  # risk-service, asked about every new payment (gateway.risk).
+  grpc:
+    client:
+      channel:
+        risk:
+          target: ${RISK_SERVICE_TARGET:static://localhost:9090}
 
 server:
   port: 8090
@@ -53,6 +59,13 @@ gateway:
       - 2h
       - 5h
       - 10h
+  risk:
+    enabled: ${GATEWAY_RISK_ENABLED:true}
+    deadline: 300ms
+    # What a payment gets while risk-service can't answer: allow (it goes ahead unchecked) or decline (it fails).
+    when-unavailable: ${GATEWAY_RISK_WHEN_UNAVAILABLE:allow}
+    # After half of its last ten answers (at least five) were errors or late, risk-service isn't asked for this long.
+    open-for: 30s
   providers:
     # Where new payments go, the preferred provider first: acquirer-sim, monobank, or both in either order. A payment
     # goes to the next provider only when one never got its charge. It is always looked up where it was charged.

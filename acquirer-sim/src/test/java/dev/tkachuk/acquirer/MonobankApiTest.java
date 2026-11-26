@@ -256,9 +256,11 @@ class MonobankApiTest {
             WebhookReceiver receiver = new WebhookReceiver(server);
             server.createContext("/hook", exchange -> {
                 byte[] body = exchange.getRequestBody().readAllBytes();
-                receiver.received.add(new Received(body, exchange.getRequestHeaders().getFirst("X-Sign")));
+                String signature = exchange.getRequestHeaders().getFirst("X-Sign");
+                // Answered before the test sees it: a test that has its webhook may stop the receiver at once.
                 exchange.sendResponseHeaders(200, -1);
                 exchange.close();
+                receiver.received.add(new Received(body, signature));
             });
             server.start();
             return receiver;
