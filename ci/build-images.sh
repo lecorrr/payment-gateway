@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The pipeline's images job: builds the four apps' images from the jars of the verify job and has Trivy look in each
+# The pipeline's images job: builds the five apps' images from the jars of the verify job and has Trivy look in each
 # for known vulnerabilities, in its system packages and in its Java libraries. One of HIGH or CRITICAL severity that
 # has a fix fails the job, before anything is pushed. With PUSH_IMAGES=true (on main) the images then go to the
 # project's container registry as $CI_REGISTRY_IMAGE/<app>:$CI_COMMIT_SHA. Writes images.env with APP_VERSION, the
@@ -8,7 +8,7 @@
 #   bash ci/build-images.sh
 set -euo pipefail
 
-apps=(gateway-service risk-service acquirer-sim merchant-sim)
+apps=(gateway-service risk-service ledger-service acquirer-sim merchant-sim)
 registry="${CI_REGISTRY_IMAGE:?GitLab sets CI_REGISTRY_IMAGE; this script is the pipeline images job}"
 tag="${CI_COMMIT_SHA:?GitLab sets CI_COMMIT_SHA; this script is the pipeline images job}"
 

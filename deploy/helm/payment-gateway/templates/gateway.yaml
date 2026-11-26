@@ -67,6 +67,10 @@ spec:
               value: {{ .Values.gateway.providers | quote }}
             - name: GATEWAY_PUBLIC_URL
               value: {{ $gatewayUrl | quote }}
+            # The payment-events topic, which the gateway makes when Kafka is first reachable.
+            {{- include "payment-gateway.kafkaEnv" . | nindent 12 }}
+            - name: GATEWAY_EVENTS_REPLICAS
+              value: {{ .Values.kafka.replicationFactor | int | quote }}
             {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "GATEWAY_FINGERPRINT_KEY") | nindent 12 }}
             {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "GATEWAY_DEMO_MERCHANT_API_KEY" "optional" true) | nindent 12 }}
             {{- if .Values.acquirerSim.enabled }}

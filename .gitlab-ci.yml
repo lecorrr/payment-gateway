@@ -58,8 +58,9 @@ variables:
         - "--mtu=1360"
         - "--default-network-opt=bridge=com.docker.network.driver.mtu=1360"
 
-# Unit tests, integration tests against PostgreSQL and Redis in Testcontainers, the coverage gate (80 % of lines per
-# module), and SpotBugs with FindSecBugs over every module's classes: any of them failing fails the pipeline.
+# Unit tests, integration tests against PostgreSQL, Redis and Kafka in Testcontainers, the coverage gate (80 % of
+# lines per module), and SpotBugs with FindSecBugs over every module's classes: any of them failing fails the
+# pipeline.
 verify:
   stage: test
   extends: .docker-in-docker
@@ -74,7 +75,7 @@ verify:
       - .m2/
   script:
     - ./mvnw $MAVEN_CLI_OPTS verify
-    - bash ci/print-coverage.sh gateway-service risk-service acquirer-sim merchant-sim
+    - bash ci/print-coverage.sh gateway-service risk-service ledger-service acquirer-sim merchant-sim
   # The gateway's line coverage, shown on the pipeline and merge request pages.
   coverage: '/gateway-service line coverage: \d+\.\d+%/'
   artifacts:
@@ -83,6 +84,7 @@ verify:
     paths:
       - gateway-service/target/gateway-service.jar
       - risk-service/target/risk-service.jar
+      - ledger-service/target/ledger-service.jar
       - acquirer-sim/target/acquirer-sim.jar
       - merchant-sim/target/merchant-sim.jar
       - "*/target/site/jacoco/"
@@ -183,7 +185,7 @@ e2e:
     paths:
       - e2e/
 
-# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.8.0
+# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.9.2
 # (ci/release-images.sh). A version is released once: a later commit of the same version keeps only its commit tag.
 release:
   stage: release

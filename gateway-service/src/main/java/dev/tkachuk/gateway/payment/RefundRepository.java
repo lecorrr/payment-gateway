@@ -106,13 +106,13 @@ class RefundRepository {
      * transaction ends.
      */
     long reservedAmount(UUID paymentId) {
-        Long reserved = jdbc.sql("""
+        // COALESCE gives 0 when there are no refunds, and single() never returns null: Spring throws instead.
+        return jdbc.sql("""
                         SELECT COALESCE(SUM(amount), 0)::bigint FROM refunds
                         WHERE payment_id = :paymentId AND status IN ('PROCESSING', 'SUCCEEDED')""")
                 .param("paymentId", paymentId)
                 .query(Long.class)
                 .single();
-        return reserved == null ? 0 : reserved;
     }
 
     /**

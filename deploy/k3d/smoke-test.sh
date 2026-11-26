@@ -5,7 +5,9 @@
 # - through the Ingress at http://*.ENV.localhost:8280: a payment and its replay, a refund settled by monobank-sim's
 #   webhook, both webhooks at the demo shop, a 3-D Secure payment from the challenge page back to the shop's page,
 #   and a payment risk-service declines;
-# - the NetworkPolicies: the gateway reaches PostgreSQL and Redis, merchant-sim reaches neither;
+# - the ledger booked the payment and its refund from their events on Kafka;
+# - the NetworkPolicies: the gateway reaches PostgreSQL, Redis and Kafka, the ledger Kafka and its own database,
+#   which the gateway can't reach, and merchant-sim reaches none of them;
 # - with more than one risk-service pod (staging), every pod gets the gateways' calls;
 # - with the autoscaler (staging), at least two gateways run, and a rollout of the gateway loses no payment;
 # - helm test.
@@ -198,11 +200,25 @@ can_connect() {
 }
 
 gateway_reaches_its_stores() {
-    can_connect gateway postgres 5432 && can_connect gateway redis 6379
+    can_connect gateway postgres 5432 && can_connect gateway redis 6379 && can_connect gateway kafka 9092
+}
+
+ledger_reaches_its_stores() {
+    can_connect ledger-service kafka 9092 && can_connect ledger-service ledger-postgres 5432
+}
+
+gateway_reaches_no_ledger_database() {
+    ! can_connect gateway ledger-postgres 5432
 }
 
 merchant_sim_reaches_no_store() {
-    ! can_connect merchant-sim postgres 5432 && ! can_connect merchant-sim redis 6379
+    ! can_connect merchant-sim postgres 5432 && ! can_connect merchant-sim redis 6379 \
+        && ! can_connect merchant-sim kafka 9092 && ! can_connect merchant-sim ledger-postgres 5432
+}
+
+# Whether what the ledger booked for the payment adds up to NET, in minor units.
+ledger_net_is() {
+    [[ "$(pod_get deploy/ledger-service 8095 "/api/v1/payments/$1" | json_value net)" == "$2" ]]
 }
 
 # Whether any gateway pod is stopping: told to, but not gone yet.
@@ -241,8 +257,9 @@ kc get pods -o wide >> "$log" 2>&1
 
 # Every app is ready, in the repository's version.
 not_ready=()
-for workload in deployment/gateway deployment/risk-service deployment/acquirer-sim deployment/monobank-sim \
-    deployment/merchant-sim deployment/redis statefulset/postgres; do
+for workload in deployment/gateway deployment/risk-service deployment/ledger-service deployment/acquirer-sim \
+    deployment/monobank-sim deployment/merchant-sim deployment/redis statefulset/postgres statefulset/ledger-postgres \
+    statefulset/kafka; do
     kc rollout status "$workload" --timeout=3m >> "$log" 2>&1 || not_ready+=("$workload")
 done
 if (( ${#not_ready[@]} == 0 )); then
@@ -252,7 +269,7 @@ else
 fi
 
 stale=()
-for app in gateway:8081 risk-service:8094 acquirer-sim:8081 monobank-sim:8081 merchant-sim:8081; do
+for app in gateway:8081 risk-service:8094 ledger-service:8081 acquirer-sim:8081 monobank-sim:8081 merchant-sim:8081; do
     for pod in $(pods_of "${app%%:*}"); do
         running="$(pod_get "pod/$pod" "${app##*:}" /actuator/info | json_value build.version)"
         [[ "$running" == "$version" ]] || stale+=("$pod runs ${running:-no version it would tell}")
@@ -304,6 +321,9 @@ check "the demo shop got payment.succeeded" "not at $shop/events in 30 s" \
     wait_until 30 shop_has_event "$paid_id" payment.succeeded
 check "the demo shop got refund.succeeded" "not at $shop/events in 30 s" \
     wait_until 30 shop_has_event "${refund_id:--}" refund.succeeded
+# 150.00 UAH paid less 50.00 refunded, both from their events on Kafka.
+check "the ledger booked the payment and its refund, net 100.00 UAH" "not in 30 s" \
+    wait_until 30 ledger_net_is "$paid_id" 10000
 
 # 3-D Secure, as the customer's browser goes through it.
 pay 4000000000003220 "$shop/return"
@@ -331,8 +351,13 @@ else
 fi
 
 # The NetworkPolicies, from inside the pods.
-check "the gateway reaches PostgreSQL and Redis" "a connection from its pod did not open" gateway_reaches_its_stores
-check "merchant-sim reaches neither PostgreSQL nor Redis" "a connection from its pod opened" \
+check "the gateway reaches PostgreSQL, Redis and Kafka" "a connection from its pod did not open" \
+    gateway_reaches_its_stores
+check "the ledger reaches Kafka and its own PostgreSQL" "a connection from its pod did not open" \
+    ledger_reaches_its_stores
+check "the gateway can't reach the ledger's PostgreSQL" "a connection from its pod opened" \
+    gateway_reaches_no_ledger_database
+check "merchant-sim reaches none of the databases, Redis and Kafka" "a connection from its pod opened" \
     merchant_sim_reaches_no_store
 
 # Every risk-service pod gets calls: the gateways balance gRPC over the pods behind the headless Service.

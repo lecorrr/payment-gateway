@@ -1,17 +1,21 @@
 # Architecture
 
-Four Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments and their
+Five Spring Boot apps in one Maven build. **gateway-service** is the merchant API and owns the payments and their
 refunds: it asks risk-service about each new payment, charges cards with acquirer-sim and with monobank's acquiring
 API, moving a payment on to the other one when a provider can't take it, and refunds through the provider that
-charged. **risk-service** decides, over gRPC, whether a payment
-may go ahead, and keeps nothing but each card's recent payments in Redis. **acquirer-sim** plays a card acquirer
+charged. Every change of a payment or refund also goes to the Kafka topic `payment-events`. **risk-service** decides,
+over gRPC, whether a payment may go ahead, and keeps nothing but each card's recent payments in Redis.
+**ledger-service** reads `payment-events` and books each payment and refund that succeeded into a double-entry
+ledger in a database of its own. **acquirer-sim** plays a card acquirer
 behind the gateway, with its own API, error format and naming (snake_case), the way a real provider would, and under
 `/api/merchant` the part of monobank's API the gateway uses, so a second copy of it can play monobank;
 **merchant-sim** plays a shop in front of it, taking the gateway's webhooks and the customer's return from 3-D
 Secure. **risk-api** is no app: it holds the gRPC contract, risk.proto, and the Java code generated from it, which
 the gateway and risk-service both build on. Apart from that contract the apps share no code: merchant-sim checks
 webhook signatures with its own code, and a test in each app checks the same published signature example, so the two
-sides can't drift apart. In compose, Prometheus, Grafana and Jaeger watch all of them (see Observability). On
+sides can't drift apart. The topic's contract is [docs/payment-events.yaml](docs/payment-events.yaml), in AsyncAPI,
+and tests on both sides read it: the gateway's records must match its schemas, and the ledger must book its
+examples. In compose, Prometheus, Grafana and Jaeger watch all of them (see Observability). On
 Kubernetes, one Helm chart runs them, an environment per namespace (see Kubernetes). The GitLab pipeline builds
 each image once, checks it, runs it on a cluster of its own and only then releases it (see Pipeline).
 
@@ -22,17 +26,18 @@ each image once, checks it, runs it on a cluster of its own and only then releas
 | `common`   | currencies, `ErrorCode` and `GatewayException`, problem details, the clock              | nothing                        |
 | `card`     | card number (Luhn, brand, masking), expiry, CVC; no framework imports                   | common                         |
 | `webhook`  | merchants' webhook endpoints and secrets, the outbox, signing, the dispatcher           | common                         |
+| `event`    | the outbox of the payment-events topic, its publisher, the CloudEvents records          | common                         |
 | `merchant` | merchants, the API key filter, the current merchant, the demo merchant                  | common, webhook                |
 | `provider` | the connector contract (`ProviderConnector`, `ChargeRequest`, `ChargeLookup`, `ProviderResult`, `RefundRequest`, `RefundLookup`, `ProviderRefundResult`), the connectors by name, the routing between them (`ProviderRouter`), `ChargeNotifications` and `RefundNotifications`; one package per provider below it (`acquirersim`, `monobank`) | common, card |
 | `risk`     | the client of risk-service (`RiskCheck`, `RiskVerdict`) and the circuit breaker in front of it | common                         |
-| `payment`  | the API controllers, `PaymentService` and `RefundService`, the payments and refunds tables, fingerprints and card tokens, the checkers, the 3-D Secure return, the payment and refund metrics | common, card, merchant, provider, risk, webhook, api |
+| `payment`  | the API controllers, `PaymentService` and `RefundService`, the payments and refunds tables, fingerprints and card tokens, the checkers, the 3-D Secure return, the payment and refund metrics | common, card, merchant, provider, risk, webhook, event, api |
 
 `api` is the interface and DTOs generated from
 [payment-gateway.yaml](gateway-service/src/main/resources/static/openapi/payment-gateway.yaml), the webhook body
 included. `LayeringTest` checks the table on every build, and also that `card` imports no Spring or Jakarta classes,
 that no module imports a provider's package (Spring wires the connector in, so a new provider touches nothing else),
 and that only `risk` imports the gRPC contract. `webhook` knows nothing of payments: it stores and sends whatever
-JSON body `payment` gives it.
+JSON body `payment` gives it, and `event` likewise whatever data.
 
 ## A payment, step by step
 
@@ -234,6 +239,58 @@ sends one when a refund finishes, and without a report the checker finds the out
   a failure, like timeouts, refused connections and other statuses: the event is tried again after each of
   `retry-delays` in turn, with up to a tenth more at random, then given up. 410 Gone is given up at once.
 
+## Events and the ledger
+
+The gateway publishes, ledger-service consumes, and nothing on the way is lost or counted twice:
+
+- **A second outbox.** `PaymentService` and `RefundService` write each status change's events in the change's own
+  transaction: the webhook event (when the merchant has an endpoint) and the topic's event (always), with one id
+  between them, so a consumer can match an event to the merchant's webhook. `EventOutbox.add` refuses to run outside
+  a transaction, as `WebhookOutbox.add` does. With the event goes the W3C `traceparent` of the request that made the
+  change.
+- **One publisher, in order.** `EventPublisher` runs every 200 ms, on a scheduler thread of its own. It takes a
+  PostgreSQL advisory lock for the run's transaction (`pg_try_advisory_xact_lock`), so of several gateways one
+  publishes at a time and the others skip the run; that one sends the oldest events, up to 100, in their order, and
+  marks published the ones Kafka took, up to the first it didn't: a failed send leaves it and every later event for
+  the next run. The producer is idempotent with `acks=all`, so a retry inside the client neither duplicates nor
+  reorders a record.
+- **Kafka is not needed for payments.** A send that fails ends the run, and the next waits 1 s, then twice as long
+  each time up to 30 s, logged on the first failure and on every tenth. Payments go on meanwhile, their events
+  waiting in the outbox, and `gateway_events_lag_seconds` shows how long the oldest has waited. The client's timeouts
+  are a few seconds, not its default minute, so a run never hangs. The topic is made, with its three partitions, by
+  the first run that reaches Kafka, events or not, so consumers can subscribe before the first payment; the broker
+  makes no topics itself. Published events are deleted after seven days.
+- **The records.** CloudEvents 1.0 in Kafka's binary mode: the event's attributes are headers (`ce_id`, `ce_type`,
+  `ce_source`, `ce_time`, `ce_subject`), the data is the record's value as JSON, and the key is the payment's id, so
+  a payment's events, its refunds' included, stay on one partition, in order. Delivery is at least once.
+- **The ledger takes each event once.** One consumer group, `ledger`, reads the topic; each partition is read by one
+  replica at a time. For each record, in one transaction, the ledger notes its `ce_id` as taken
+  (`INSERT ... ON CONFLICT DO NOTHING`) and books it; the offset is committed after the transaction. An event that
+  comes again finds its id taken and changes nothing, so at-least-once delivery books exactly once.
+- **Double entry.** A succeeded payment is an entry with two postings in minor units: the provider owes the amount
+  (debit `provider:<name>`) and the merchant is owed it (credit `merchant:<id>`); a succeeded refund is the other way
+  round. Every entry adds up to zero, which `JournalEntry` checks before anything is written, and the tables'
+  constraints back that up. A merchant's balance is what its account was credited less what it was debited, per
+  currency. Other statuses, and types the ledger doesn't know, are noted as taken and not booked.
+- **Strict about what it books, tolerant about the rest.** A succeeded payment or refund must carry everything its
+  entry needs, keyed by its own payment, with an amount in whole minor units; any other event's data isn't read, so
+  it may grow. Unknown fields are ignored.
+- **What can't be read goes aside; everything else waits.** An event the ledger can't read (`MalformedEventException`)
+  goes to `payment-events-ledger-dlt` at once, with the reason in its headers, and the partition moves on. Any other
+  failure, such as the database being down, is tried again after about 1 s, then about twice as long each time up
+  to 30 s, with jitter, until it works: skipping it would leave the ledger short of a payment. The partition waits
+  behind it, which the consumer lag on the dashboard shows.
+- **Its own database.** The ledger's tables are in `ledger-postgres` (compose) or a database of its own (Kubernetes,
+  production), which only the ledger reaches; it shares no table and no code with the gateway, only the contract.
+- **An internal API.** `GET /api/v1/payments/{id}` is a payment's entries, in the order they happened (those of one
+  moment in the order they were booked), and what they add up to, `GET /api/v1/merchants/{id}/balances` a merchant's
+  balance in each currency. It has no authentication: compose publishes it on localhost, and on Kubernetes no network
+  policy lets anything reach it (`kubectl port-forward` does).
+
+The ledger starts with the events published from 0.9.0 on: payments made before the gateway had the outbox are not
+in it, and a refund of one would be booked without its payment. A backfill from the gateway's tables, as events
+under ids of their own, would close that gap.
+
 ## Card data
 
 - **Stored:** the brand, the first six and the last four digits, which PCI DSS allows to be shown.
@@ -276,8 +333,12 @@ always looked up with the provider that charged it, so changing the order leaves
   `PaymentMetrics` counts a payment or refund where its outcome is stored, after the guarded update, so each one
   counts once whoever settled it; `RiskCheck` counts risk-service's answers, `WebhookDispatcher` each delivery's
   outcome, risk-service its decisions by rule. The circuit breakers are published by Resilience4j's
-  `TaggedCircuitBreakerMetricsPublisher`, for the providers and for risk-service. Labels take only short, fixed
-  lists of values (statuses, provider names, the gateway's codes), never ids, so the series stay few.
+  `TaggedCircuitBreakerMetricsPublisher`, for the providers and for risk-service. `EventPublisher` counts the events
+  Kafka took and the runs that failed, and reports how long the oldest waiting event has waited; the ledger counts
+  the events it took by outcome and type, and its dead letters, and Spring Kafka times each record's handling. Labels
+  take only short, fixed lists of values (statuses, provider names, the gateway's codes, the contract's event types
+  with `other` for the rest), never ids, so the series stay few. The Kafka clients' own metrics, the ledger's
+  consumer lag among them, are published as `kafka_*`.
 - **Latencies.** Spring times HTTP requests in and out (`RestClient` from the auto-configured builder, which every
   connector and the webhook sender use) and the gRPC calls, and the gateway keeps them as histograms, so Grafana
   can show percentiles across instances.
@@ -286,7 +347,10 @@ always looked up with the provider that charged it, so changing the order leaves
   client and server interceptors Spring Boot registers. Each app sends its spans over OTLP/HTTP to Jaeger, and only
   when `MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT` is set, so tests export nothing. Sampling is 1.0,
   as a demo can afford. Work the schedulers start (the checkers, the webhook dispatcher) begins traces of its own,
-  so a webhook's trace starts at the dispatcher, not at the payment that caused it.
+  so a webhook's trace starts at the dispatcher, not at the payment that caused it. An event on Kafka is different:
+  it carries the `traceparent` of the request that made the change, stored with it in the outbox, and the ledger's
+  listener continues that trace (`spring.kafka.listener.observation-enabled`), so booking a payment shows in the
+  trace of the request that paid it, however late it was published.
 - **Logs.** Each line carries `[traceId-spanId]` while a trace is open, so a payment's lines in the gateway and
   risk-service can be found by one id.
 - **Grafana** is provisioned from files: Prometheus as its data source, and the dashboard, read-only (a changed
@@ -300,9 +364,9 @@ and `helm test`.
 
 [deploy/helm/payment-gateway](deploy/helm/payment-gateway) is one chart for every environment, installed once per
 namespace. Its objects are named after the apps, as compose's services are, so the apps find each other by the same
-names: `postgres`, `redis`, `risk-service`. An environment's values file holds only what it changes: replicas,
-autoscaling and disruption budgets, whether the simulators, PostgreSQL and Redis run in the namespace, the Ingress
-hosts, where traces go. `values.schema.json` refuses a value the chart doesn't know, and a few checks in the
+names: `postgres`, `redis`, `kafka`, `risk-service`. An environment's values file holds only what it changes:
+replicas, autoscaling and disruption budgets, whether the simulators, PostgreSQL, Redis and Kafka run in the
+namespace, the Ingress hosts, where traces go. `values.schema.json` refuses a value the chart doesn't know, and a few checks in the
 templates refuse what doesn't fit together, such as a disruption budget no node drain could ever meet.
 
 Every pod of an app:
@@ -315,12 +379,13 @@ Every pod of an app:
 - is probed on its management port (risk-service's HTTP port has nothing else, so it is 8094 there). The startup
   probe gives the JVM three minutes; liveness and readiness ask Spring Boot's health groups;
 - stops in two steps: the preStop hook waits 10 s while the pod leaves the Service and the Ingress's backends, then
-  Spring finishes the requests it has, for up to 30 s. The gateway and risk-service roll out with
+  Spring finishes the requests it has, for up to 30 s. The gateway, risk-service and the ledger roll out with
   `maxUnavailable: 0`, so a rollout never has fewer ready pods than before it.
 
 The Secret is made outside the chart (`deploy.sh` makes one of random keys on k3d; in production the cluster's
 secret store would), and the chart only reads it, so no secret is in a values file or in Helm's release history.
-It stays after `helm uninstall`, as PostgreSQL's volume does, whose password it holds.
+It stays after `helm uninstall`, as the databases' volumes do, whose passwords it holds. `deploy.sh` adds a key a
+newer version needs to a Secret an older one made, as `LEDGER_DB_PASSWORD` for 0.9.0.
 
 The network policies deny everything in both directions, let every pod use the cluster's DNS, and then open what
 the apps need:
@@ -328,14 +393,16 @@ the apps need:
 | From                    | To                                                                                   |
 |-------------------------|--------------------------------------------------------------------------------------|
 | the ingress controller  | gateway 8090, acquirer-sim and monobank-sim 8091, merchant-sim 8092                  |
-| gateway                 | postgres 5432, redis 6379, risk-service 9090, the simulators 8091, merchant-sim 8092 |
+| gateway                 | postgres 5432, redis 6379, kafka 9092, risk-service 9090, the simulators 8091, merchant-sim 8092 |
 | risk-service            | redis 6379                                                                           |
+| ledger-service          | kafka 9092, ledger-postgres 5432                                                     |
 | monobank-sim            | gateway 8090: its webhooks                                                           |
 | `helm test`, Prometheus | every app's management port                                                          |
 
-Outside the namespace, production adds the gateway's egress to monobank's API and the merchants' webhook endpoints
-(443) and to the managed database, and both apps' to the managed Redis and the OpenTelemetry Collector
-(`networkPolicy.gatewayEgress`, `riskServiceEgress`).
+Nothing reaches the ledger's API port, and Kafka reaches nothing: its controller is in the same process. Outside
+the namespace, production adds the gateway's egress to monobank's API and the merchants' webhook endpoints (443), to
+the managed database and to MSK, the apps' to the managed Redis and the OpenTelemetry Collector, and the ledger's to
+its database and MSK (`networkPolicy.gatewayEgress`, `riskServiceEgress`, `ledgerEgress`).
 
 risk-service's Service is headless: its name resolves to every ready pod, and each gateway's gRPC channel (target
 `dns:///risk-service:9090`, with Spring Boot's default `round_robin`) keeps a connection to each pod and takes turns.
@@ -345,13 +412,21 @@ resolve the name again and a pod that came up after them, in a rollout or by the
 The simulators keep their state in memory (charges, challenges, monobank-sim's signing key), so each runs as one
 pod that a new one replaces (`Recreate`) rather than runs beside. PostgreSQL is a StatefulSet with a volume claim,
 running as the alpine image's postgres user (70) with `PGDATA` a folder inside the volume, since that user may not
-own the volume's top. Redis keeps nothing on disk: the open circuits and recent payment counts mean nothing after
-a restart.
+own the volume's top; the ledger's `ledger-postgres` is the same template with its own database, user, password
+and volume. Redis keeps nothing on disk: the open circuits and recent payment counts mean nothing after a restart.
+
+Kafka is the official `apache/kafka` image as one node that is both broker and controller (KRaft), a StatefulSet
+with a volume claim, running as the image's appuser (1000). The image writes `server.properties` from the `KAFKA_`
+variables into `/opt/kafka/config` at each start, so that folder is an emptyDir, and once any such variable is set it
+leaves out its own defaults, so the chart sets them all. The log folder is a folder inside the volume, whose top may
+hold `lost+found`, and the cluster id is fixed in the values, since the volume's data belongs to it. Its probes open
+the listener's port: Kafka has no HTTP health endpoint, and its own tools each start a JVM. With one broker every
+topic has one replica; production points the apps at MSK instead, over TLS, with three.
 
 On k3d, `deploy.sh` builds the images from the jars and tags them with a checksum of the jars, so a new build means
 new pods and the same jars change nothing; with `IMAGE_REGISTRY` and `IMAGE_TAG` it takes a registry's images
-instead, such as a released version's. `k3d image import` loads them, PostgreSQL's and Redis' with them, into every
-node, so the nodes pull nothing from a registry. The chart is checked twice: `ci/check-chart.sh` renders every
+instead, such as a released version's. `k3d image import` loads them, PostgreSQL's, Redis' and Kafka's with them,
+into every node, so the nodes pull nothing from a registry. The chart is checked twice: `ci/check-chart.sh` renders every
 environment and checks the result against Kubernetes 1.35's schemas, along with values the chart must refuse, and
 `deploy/k3d/smoke-test.sh` checks an environment that runs, from outside through the Ingress and from inside the
 pods.
@@ -379,7 +454,7 @@ through them:
   JSpecify annotations, so a value Spring marks as possibly null must be checked before it is used.
 - **secrets** runs gitleaks' default rules over the whole history, since a secret a later commit deleted is still
   in git. `.gitleaks.toml` leaves out the tests, whose keys are made up for them or published test vectors.
-- **images** builds the four images from verify's jars, and Trivy scans each one's Ubuntu packages and the Java
+- **images** builds the five images from verify's jars, and Trivy scans each one's Ubuntu packages and the Java
   libraries in its jar (`ci/build-images.sh`). Only what can be fixed fails the job (`--ignore-unfixed`): a finding
   no newer version fixes yet would stop every pipeline and leave nothing to do. An exception would go into a
   `.trivyignore.yaml`, with its reason and an expiry date; there are none. On main the images are then pushed to
@@ -390,7 +465,7 @@ through them:
   smoke test sends its requests for `*.dev.localhost:8280` to `docker:8280` (`INGRESS_ADDRESS`). Whatever the
   outcome, the job keeps the cluster's state and every pod's log as artifacts (`ci/collect-e2e-logs.sh`).
 - **release** gives the commit's images the version they were built as, from `pom.xml` through the jars'
-  build-info, such as `:0.8.0`, as a copy of the same manifest: the released image is byte for byte the one the
+  build-info, such as `:0.9.2`, as a copy of the same manifest: the released image is byte for byte the one the
   checks saw (`ci/release-images.sh`).
 
 Every tool a job downloads comes from `ci/install-tools.sh`, in a fixed version, checked against its published
@@ -465,7 +540,7 @@ checksum before it runs.
   runs those very images, and release only adds the version's tag to the same manifest. Building again for the
   release would release an image no check ever saw.
 - **A version is released once.** The release job never moves a version's tag: a later commit of the same version
-  keeps only its commit tag, so `0.8.0` names one build wherever it runs.
+  keeps only its commit tag, so `0.9.2` names one build wherever it runs.
 - **Static analysis fails the build, with its exceptions written down.** A report nobody must read stops being
   read; a short exclude file, a reason for each entry, keeps the findings few enough that a new one gets looked at.
 - **Image scans fail on what can be fixed.** HIGH and CRITICAL vulnerabilities with a fix stop the pipeline; one
@@ -476,6 +551,28 @@ checksum before it runs.
   published checksum, so a pipeline runs the same tools next month, and a download that isn't the release fails.
 - **One clock.** All timestamps come from the `Clock` bean, truncated to microseconds like PostgreSQL's, so a
   payment returned right away equals the one read back later.
+- **A transactional outbox and a polling publisher, not change data capture.** The events are written by the code
+  that makes the change, in its transaction, and sent by the gateway itself; Debezium reading PostgreSQL's log would
+  need logical replication and a Kafka Connect cluster to run, for the same guarantee.
+- **One publisher at a time, by an advisory lock.** Order matters within a payment, and one sender keeps it simply;
+  the lock lives as long as the run's transaction, so a gateway that dies frees it, and another one takes over on its
+  next run.
+- **The payment's id as the key.** Kafka keeps order only within a partition, so all of a payment's events, its
+  refunds' too, go to the same one; different payments spread over the partitions.
+- **CloudEvents in binary mode.** The attributes are headers a consumer can route or deduplicate by without parsing
+  the data, and the data stays the same JSON the contract describes; the event's id is its webhook's.
+- **Deduplication in the booking's transaction.** The event's id and its entry are written together, or neither
+  is: a consumer that crashes between booking and committing the offset reads the event again and skips it.
+- **Dead letters only for what can't be read.** Trying an unreadable event again won't change it, so it waits
+  aside with its reason; an event that can be read is never skipped, since a ledger with a gap is worse than one
+  that waits, and the lag shows that it waits.
+- **The ledger's own database.** It is a separate service with data of its own: sharing the gateway's database would
+  tie their schemas, their releases and their outages together.
+- **The gateway makes the topic.** It owns the topic's events and its partitions; the broker makes no topics, so a
+  consumer that misspells one gets an error rather than a topic of its own.
+- **One Kafka broker in the namespace, MSK in production.** dev and staging need a Kafka that runs on a laptop;
+  production needs one that survives a broker and a zone, which a managed service gives without running ZooKeeper,
+  controllers or upgrades ourselves.
 
 ## Configuration
 
@@ -520,5 +617,17 @@ checksum before it runs.
 | `spring.grpc.server.keepalive.connection.max-age` | none                  | risk-service: when a connection ends; the chart: 1m        |
 | `management.tracing.sampling.probability`       | 1.0                     | the share of requests traced                               |
 | `GRAFANA_PORT`, `PROMETHEUS_PORT`, `JAEGER_PORT` | 3000, 9090, 16686      | compose: the host ports of the three                       |
+| `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SECURITY_PROTOCOL` | localhost:9092, PLAINTEXT | the gateway's and the ledger's Kafka              |
+| `GATEWAY_EVENTS_ENABLED`                        | true                    | whether the outbox's events are published                  |
+| `GATEWAY_EVENTS_TOPIC`, `GATEWAY_EVENTS_REPLICAS` | payment-events, 1     | the topic and the replicas it is made with                 |
+| `gateway.events.partitions`                     | 3                       | the partitions it is made with                             |
+| `gateway.events.publish-interval`, `.batch-size` | 200ms, 100             | how often the publisher runs, and the most it sends a run  |
+| `gateway.events.send-timeout`                   | 15s                     | how long a run waits for Kafka's answers                   |
+| `gateway.events.keep-published-for`             | 7d                      | when published events are deleted from the outbox          |
+| `spring.task.scheduling.pool.size`              | 4                       | the gateway's threads for its background tasks             |
+| `LEDGER_TOPIC`, `LEDGER_DEAD_LETTER_TOPIC`      | payment-events, payment-events-ledger-dlt | what the ledger reads, and where what it can't read goes |
+| `LEDGER_REPLICAS`                               | 1                       | the replicas the dead-letter topic is made with            |
+| `DB_URL`, `DB_USER`, `DB_PASSWORD`              | localhost:5432/ledger, ledger, ledger | the ledger's database                       |
+| `LEDGER_PORT`                                   | 8095                    | compose: the host port of the ledger's API                 |
 
 Every settings record checks its values at startup and names the setting that is wrong.

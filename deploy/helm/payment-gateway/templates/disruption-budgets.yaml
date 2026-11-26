@@ -1,8 +1,11 @@
-{{- $apps := list (dict "name" "gateway" "key" "gateway" "values" .Values.gateway)
-      (dict "name" "risk-service" "key" "riskService" "values" .Values.riskService) }}
+{{- $apps := list (dict "name" "gateway" "key" "gateway" "values" .Values.gateway "enabled" true)
+      (dict "name" "risk-service" "key" "riskService" "values" .Values.riskService "enabled" true)
+      (dict "name" "ledger-service" "key" "ledger" "values" .Values.ledger "enabled" .Values.ledger.enabled) }}
 {{- range $apps }}
-{{- if .values.podDisruptionBudget.enabled }}
-{{- $fewest := ternary .values.autoscaling.minReplicas .values.replicas .values.autoscaling.enabled | int }}
+{{- if and .enabled .values.podDisruptionBudget.enabled }}
+{{- /* The ledger has no autoscaler: its replicas are what its partitions can use. */ -}}
+{{- $autoscaling := .values.autoscaling | default (dict "enabled" false) }}
+{{- $fewest := ternary $autoscaling.minReplicas .values.replicas $autoscaling.enabled | int }}
 {{- if le $fewest (.values.podDisruptionBudget.minAvailable | int) }}
 {{- fail (printf "%s.podDisruptionBudget.minAvailable must be below its fewest replicas (%d): a node with one of its pods could never be drained" .key $fewest) }}
 {{- end }}

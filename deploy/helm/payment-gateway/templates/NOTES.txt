@@ -6,6 +6,13 @@ The API docs:  {{ $gatewayUrl }}/swagger-ui.html
 {{- if .Values.merchantSim.enabled }}
 The demo shop's webhooks: {{ include "payment-gateway.publicUrl" (dict "root" $ "host" .Values.ingress.hosts.merchantSim) }}/events
 {{- end }}
+{{- if .Values.ledger.enabled }}
+
+The ledger's API, which nothing else may reach:
+
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/ledger-service 8095
+  curl http://localhost:8095/api/v1/payments/<payment id>
+{{- end }}
 
 The demo merchant's API key, when the Secret has one:
 

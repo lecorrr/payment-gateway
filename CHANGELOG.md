@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.9.2 (2026-11-26)
+
+The first full builds of 0.9.0 and 0.9.1 failed, so neither was released: this is the first release with what 0.9.0
+describes.
+
+- `./mvnw verify` failed at SpotBugs in 0.8.0 and 0.9.0: `RefundRepository.reservedAmount` checked for a null that
+  can't come, since Spring 7's `JdbcClient` declares `single()` `@NonNull` and throws instead. The check is gone.
+  The build stopped in gateway-service, so the modules after it were neither tested nor checked, and the pipeline
+  fails the same way on 0.8.0.
+- The ledger sorted a payment's entries of one moment by their ids, which are random, so `LedgerIT` failed about
+  every other run: all its events carry one time. Such entries now come in the order they were booked, and a test
+  whose refund id sorts before its payment's checks it.
+- ledger-service logged `spring.kafka.bootstrap-servers` as where it reads from, which in a test is not where it
+  connects: `@ServiceConnection` gives the consumer the container's address. It now logs the servers its consumer
+  is built with.
+
+## 0.9.0 (2026-11-26)
+
+- Events on Kafka. Every status a payment or refund reaches is written to a second outbox, `event_outbox`
+  (migration V4), in the transaction of the change, with the same id as its webhook and the trace context of the
+  request that made it. `EventPublisher` sends them to the topic `payment-events` as CloudEvents 1.0 in Kafka's
+  binary mode, keyed by the payment's id: one gateway at a time (an advisory lock), in order, at least once, an event
+  marked published only once Kafka and every event before it were taken. While Kafka is down, payments go on and
+  their events wait; the publisher tries again after 1 s, then twice as long each time up to 30 s. It makes the topic
+  as soon as Kafka answers, and deletes published events after seven days. The producer is idempotent with
+  `acks=all`, and its and the admin client's timeouts are seconds, not the clients' default minute.
+- The topic's contract, [docs/payment-events.yaml](docs/payment-events.yaml), in AsyncAPI 3.0, with examples:
+  the gateway's tests check its records against the schemas, the ledger's book its examples.
+- ledger-service, a new app: it reads `payment-events` as consumer group `ledger` and books each payment and refund
+  that succeeded into a double-entry ledger in a PostgreSQL of its own, once per event (it notes the event's id in
+  the booking's transaction), whatever Kafka delivers twice. An event it can't read goes to
+  `payment-events-ledger-dlt` with the reason in its headers; any other failure is tried again, with backoff and
+  jitter, until it works. Its internal API shows a payment's entries and a merchant's balances, and it continues
+  the trace of the request that made the change.
+- compose runs Kafka (one KRaft node), the ledger and its database; the ledger's API is on `LEDGER_PORT` (8095).
+- The Helm chart runs Kafka as a StatefulSet in the namespace (`kafka.*`), or points the apps at a cluster of their
+  own, as MSK over TLS in `values-prod.yaml`, and the ledger with its own PostgreSQL (`ledger.*`); staging runs two
+  ledgers with a disruption budget. The network policies let the gateway and the ledger reach Kafka, the ledger its
+  database, and nothing reach the ledger's API. `ci/check-chart.sh` also renders dev without the ledger, and checks
+  that the chart refuses a ledger or Kafka set up wrong.
+- `deploy/k3d/deploy.sh` builds and loads the ledger's image too, and adds the keys a newer version needs to a
+  Secret an older one made, here `LEDGER_DB_PASSWORD`. `deploy/k3d/smoke-test.sh` checks that the ledger booked a
+  payment and its refund, and the network policies around Kafka and the ledger's database. The pipeline builds,
+  scans, pushes and releases the ledger's image with the others.
+- The dashboard has a row for the events and the ledger: events to Kafka, the outbox's lag, what the ledger took,
+  its consumer lag and its time per event.
+- The gateway runs its background tasks on four threads instead of one, so the webhook dispatcher, the payment and
+  refund checkers and the event publisher don't wait on each other.
+- `MigrationIT` upgrades a database of 0.8.0, with a payment and a refund in it, to this version's schema.
+
 ## 0.8.0 (2026-11-26)
 
 - Quality gates in the pipeline, each of which stops a change that fails it:

@@ -27,6 +27,37 @@ spring:
       channel:
         risk:
           target: ${RISK_SERVICE_TARGET:static://localhost:9090}
+  # Kafka, for the payment-events topic (gateway.events). Payments never wait for it: the events go through an outbox.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+    producer:
+      # Taken only once every replica in sync has it; with idempotence, a retry neither duplicates nor reorders.
+      acks: all
+      properties:
+        enable.idempotence: true
+        # An unreachable Kafka fails a send within seconds rather than the client's default minute, so the
+        # publisher's run ends and a later one tries again. delivery.timeout.ms must cover linger.ms and
+        # request.timeout.ms.
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+        linger.ms: 5
+    admin:
+      # The publisher makes the topic once Kafka is reachable, rather than the gateway waiting for Kafka at startup.
+      auto-create: false
+      operation-timeout: 5s
+      # Its client gives up as soon, rather than after the default minute, which closing it would wait out.
+      properties:
+        request.timeout.ms: 5000
+        default.api.timeout.ms: 5000
+  # A thread for each background task (webhooks, the payment and refund checks, events), so one that waits on a slow
+  # merchant or on Kafka doesn't hold up the others.
+  task:
+    scheduling:
+      pool:
+        size: 4
 
 server:
   port: 8090
@@ -63,6 +94,19 @@ gateway:
       - 2h
       - 5h
       - 10h
+  # Every status a payment or refund reaches, as an event on Kafka for other services (the ledger), keyed by the
+  # payment's id. Written to an outbox with the change and published from there, in order, at least once.
+  events:
+    enabled: ${GATEWAY_EVENTS_ENABLED:true}
+    topic: ${GATEWAY_EVENTS_TOPIC:payment-events}
+    partitions: 3
+    # 1 for a single broker; 3 in production.
+    replicas: ${GATEWAY_EVENTS_REPLICAS:1}
+    publish-interval: 200ms
+    batch-size: 100
+    # Above the producer's delivery.timeout.ms, so Kafka answers each send before the publisher stops waiting.
+    send-timeout: 15s
+    keep-published-for: 7d
   risk:
     enabled: ${GATEWAY_RISK_ENABLED:true}
     deadline: 300ms

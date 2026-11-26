@@ -1,0 +1,3 @@
+# Only the jar goes into the image.
+*
+!target/ledger-service.jar

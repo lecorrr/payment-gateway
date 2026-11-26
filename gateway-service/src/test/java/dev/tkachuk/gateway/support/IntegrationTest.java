@@ -28,15 +28,16 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
 /**
- * The service against PostgreSQL and Redis in Testcontainers, with WireMock as acquirer-sim, as monobank and as a
- * merchant's webhook endpoint, and short timings: the providers time out after 700 ms, a payment is first looked up
+ * The service against PostgreSQL, Redis and Kafka in Testcontainers, with WireMock as acquirer-sim, as monobank and
+ * as a merchant's webhook endpoint, and short timings: the providers time out after 700 ms, a payment is first looked up
  * after 1 s and given up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms
  * apart. New payments go to acquirer-sim, and to monobank when acquirer-sim is unavailable; a provider's circuit
  * opens for 10 s once half of its last charges (at least 2, at most 4) failed. risk-service is FakeRiskService, over
  * in-process gRPC, and allows every payment until a test says otherwise. All integration tests share this one
  * context, so they share its containers too. Every test starts with no payments, no webhook events, only the demo
  * merchant, which has no webhook endpoint, a risk-service that allows everything, and every circuit closed. Refunds
- * are looked up on the same timings as payments.
+ * are looked up on the same timings as payments. The outbox's events go to the payment-events topic every 100 ms;
+ * the topic keeps every test's events, so a test reads its own by their key.
  */
 @SpringBootTest(properties = {
         "gateway.demo-merchant.api-key=" + IntegrationTest.DEMO_API_KEY,
@@ -61,11 +62,12 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
         "gateway.webhooks.dispatch-interval=100ms",
         "gateway.webhooks.connect-timeout=300ms",
         "gateway.webhooks.read-timeout=1s",
-        "gateway.webhooks.retry-delays=200ms,200ms"})
+        "gateway.webhooks.retry-delays=200ms,200ms",
+        "gateway.events.publish-interval=100ms"})
 @AutoConfigureMockMvc
 @AutoConfigureTestGrpcTransport
-@Import({PostgresTestcontainer.class, RedisTestcontainer.class, AcquirerStub.class, MonobankStub.class,
-        MerchantEndpointStub.class, FakeRiskService.class})
+@Import({PostgresTestcontainer.class, RedisTestcontainer.class, KafkaTestcontainer.class, AcquirerStub.class,
+        MonobankStub.class, MerchantEndpointStub.class, FakeRiskService.class})
 public abstract class IntegrationTest {
 
     protected static final String DEMO_API_KEY = "test-demo-merchant-key-0123456789";
@@ -109,7 +111,7 @@ public abstract class IntegrationTest {
     // Circuits before Redis: a circuit that closes removes its mark there.
     @BeforeEach
     void startClean() {
-        jdbc.execute("TRUNCATE webhook_events, refunds, payments");
+        jdbc.execute("TRUNCATE webhook_events, event_outbox, refunds, payments");
         jdbc.update("DELETE FROM webhook_endpoints");
         jdbc.update("DELETE FROM merchants WHERE code <> 'demo-shop'");
         acquirer.resetAll();

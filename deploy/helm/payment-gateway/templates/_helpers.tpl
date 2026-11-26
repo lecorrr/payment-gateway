@@ -22,7 +22,7 @@ app.kubernetes.io/instance: {{ .root.Release.Name }}
 {{- end }}
 
 {{/*
-One of the four apps' images; called with (dict "root" $ "name" "<image name>").
+One of the five apps' images; called with (dict "root" $ "name" "<image name>").
 */}}
 {{- define "payment-gateway.image" -}}
 {{- with .root.Values.image.registry }}{{ . }}/{{ end }}{{ .name }}:{{ include "payment-gateway.imageTag" .root }}
@@ -157,4 +157,18 @@ The Redis the apps use.
 - name: REDIS_PORT
   value: {{ .Values.redis.port | int | quote }}
 {{- end }}
+{{- end }}
+
+{{/*
+Where the gateway and the ledger find Kafka: the broker of the namespace, or the cluster of kafka.bootstrapServers.
+*/}}
+{{- define "payment-gateway.kafkaEnv" -}}
+- name: KAFKA_BOOTSTRAP_SERVERS
+{{- if .Values.kafka.enabled }}
+  value: kafka:9092
+{{- else }}
+  value: {{ required "kafka.bootstrapServers is needed when kafka.enabled is false" .Values.kafka.bootstrapServers | quote }}
+{{- end }}
+- name: KAFKA_SECURITY_PROTOCOL
+  value: {{ .Values.kafka.securityProtocol | quote }}
 {{- end }}

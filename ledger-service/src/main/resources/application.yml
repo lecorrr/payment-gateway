@@ -1,0 +1,70 @@
+spring:
+  application:
+    name: ledger-service
+  # Its own database, which nothing else uses.
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ledger}
+    username: ${DB_USER:ledger}
+    password: ${DB_PASSWORD:ledger}
+    hikari:
+      connection-init-sql: SET lock_timeout TO '5s'
+  flyway:
+    locations: classpath:db/migration
+    # The database may come up after the ledger, as in Kubernetes: the migration tries for about a minute.
+    connect-retries: 12
+    connect-retries-interval: 5s
+  # Errors of the API are RFC 9457 problem details, as the gateway's are.
+  mvc:
+    problemdetails:
+      enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+    consumer:
+      group-id: ledger
+      # A new group starts with the oldest events the topic still has, so nothing before the ledger is missed.
+      auto-offset-reset: earliest
+    listener:
+      # An event's offset is committed once its booking is: a crash in between means it is read again and skipped.
+      ack-mode: record
+      # Booking an event is a span of the trace in its traceparent header: the request that made the change.
+      observation-enabled: true
+    admin:
+      # The dead-letter topic is made at startup, which waits up to a minute for Kafka, as the migration does for the
+      # database, and then fails: the ledger has nothing to do without Kafka.
+      fail-fast: true
+      operation-timeout: 60s
+
+server:
+  port: 8095
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  # Prometheus scrapes the metrics; nothing here takes them over OTLP.
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  metrics:
+    distribution:
+      # Buckets for the dashboard's time per event.
+      percentiles-histogram:
+        spring.kafka.listener: true
+  tracing:
+    sampling:
+      probability: 1.0
+
+ledger:
+  topic: ${LEDGER_TOPIC:payment-events}
+  # Where an event goes that the ledger can't read; any other failure is tried again until it works.
+  dead-letter-topic: ${LEDGER_DEAD_LETTER_TOPIC:payment-events-ledger-dlt}
+  # The dead-letter topic's replication factor: 1 for a single broker, 3 in production.
+  replicas: ${LEDGER_REPLICAS:1}

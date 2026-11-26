@@ -39,7 +39,7 @@ spec:
           protocol: TCP
 ---
 # The gateway takes the API from the ingress controller, and monobank-sim's webhooks; it reaches its database,
-# Redis, risk-service, the simulators and the demo shop's webhook endpoint.
+# Redis, Kafka, risk-service, the simulators and the demo shop's webhook endpoint.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -77,6 +77,12 @@ spec:
         {{- include "payment-gateway.appPeer" (dict "root" $ "name" "redis") | nindent 8 }}
       ports:
         - port: 6379
+    {{- end }}
+    {{- if .Values.kafka.enabled }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "kafka") | nindent 8 }}
+      ports:
+        - port: 9092
     {{- end }}
     - to:
         {{- include "payment-gateway.appPeer" (dict "root" $ "name" "risk-service") | nindent 8 }}
@@ -138,6 +144,73 @@ spec:
     {{- toYaml . | nindent 4 }}
     {{- end }}
   {{- end }}
+{{- if .Values.ledger.enabled }}
+---
+# The ledger reads Kafka and writes its own database. Nothing may reach its API: kubectl port-forward does, past
+# the policies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ledger-service
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "ledger-service") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "ledger-service") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.managementPeers" . | nindent 8 }}
+      ports:
+        - port: 8081
+  {{- if or .Values.kafka.enabled .Values.ledger.postgres.enabled $np.ledgerEgress }}
+  egress:
+    {{- if .Values.kafka.enabled }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "kafka") | nindent 8 }}
+      ports:
+        - port: 9092
+    {{- end }}
+    {{- if .Values.ledger.postgres.enabled }}
+    - to:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "ledger-postgres") | nindent 8 }}
+      ports:
+        - port: 5432
+    {{- end }}
+    {{- with $np.ledgerEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if .Values.kafka.enabled }}
+---
+# Kafka takes the gateway's events and the ledger's reads. Its controller is in the same process, so it reaches
+# nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "kafka") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "kafka") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "gateway") | nindent 8 }}
+        {{- if .Values.ledger.enabled }}
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "ledger-service") | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: 9092
+{{- end }}
 {{- $simulators := list (dict "name" "acquirer-sim" "enabled" .Values.acquirerSim.enabled)
       (dict "name" "monobank-sim" "enabled" .Values.monobankSim.enabled) }}
 {{- range $simulators }}
@@ -226,6 +299,28 @@ spec:
       ports:
         - port: 5432
 {{- end }}
+{{- if and .Values.ledger.enabled .Values.ledger.postgres.enabled }}
+---
+# The ledger's PostgreSQL is the ledger's alone.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ledger-postgres
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "ledger-postgres") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "ledger-postgres") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- include "payment-gateway.appPeer" (dict "root" $ "name" "ledger-service") | nindent 8 }}
+      ports:
+        - port: 5432
+{{- end }}
 {{- if .Values.redis.enabled }}
 ---
 # Redis takes the gateways and risk-service.
@@ -272,7 +367,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: ["gateway", "risk-service", "acquirer-sim", "monobank-sim", "merchant-sim"]
+                values: ["gateway", "risk-service", "ledger-service", "acquirer-sim", "monobank-sim", "merchant-sim"]
       ports:
         - port: 8081
         - port: 8094

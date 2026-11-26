@@ -7,10 +7,11 @@ A card payment gateway for merchants. A merchant sends a card payment to one RES
 **risk-service** over gRPC whether the payment may go ahead, charges it with a payment provider, records the outcome,
 tells the merchant by a signed webhook, and never stores the card number. A payment can be refunded, in full or in
 parts. It has two providers, **acquirer-sim**, a simulated card acquirer, and **monobank**'s acquiring API, and moves
-new payments to the other one when a provider is down. risk-service, acquirer-sim, which can also play monobank, and
-**merchant-sim**, which plays the shop, live in this repository, so everything runs locally, watched by Prometheus,
-Grafana and Jaeger. A Helm chart runs the same apps on Kubernetes, with values for dev, staging and production; dev
-and staging run on a local k3d cluster.
+new payments to the other one when a provider is down. Every change of a payment or refund also goes to a Kafka
+topic, from which **ledger-service** books what succeeded into a double-entry ledger of its own. risk-service, the
+ledger, acquirer-sim, which can also play monobank, and **merchant-sim**, which plays the shop, live in this
+repository, so everything runs locally, watched by Prometheus, Grafana and Jaeger. A Helm chart runs the same apps on
+Kubernetes, with values for dev, staging and production; dev and staging run on a local k3d cluster.
 
 What it does:
 
@@ -23,6 +24,14 @@ What it does:
 - **Signed webhooks, from an outbox.** Every status a payment reaches is written in the same transaction as an
   event, and a dispatcher sends the events to the merchant, signed by the Standard Webhooks scheme. Failed
   deliveries are retried with growing delays for about 18 hours; delivery is at least once.
+- **Events on Kafka, from an outbox too.** Every status a payment or refund reaches is written to a second outbox
+  in the same transaction, and published from there to the `payment-events` topic in order, keyed by the payment, as
+  CloudEvents. Payments never wait for Kafka: while it is down they go on and their events wait. The topic's contract
+  is [AsyncAPI](docs/payment-events.yaml), and tests on both sides check against it.
+- **A double-entry ledger.** ledger-service reads the topic and books each payment and refund that succeeded as
+  balanced postings in a database of its own, once per event however often Kafka delivers it. An event it can't
+  read goes to a dead-letter topic with the reason; any other failure is tried again until it works, so no payment
+  is skipped.
 - **Handles lost answers.** If the provider doesn't answer in time, the payment stays `PROCESSING` and a background
   checker looks the charge up by its reference until it knows the outcome. The same checker settles 3-D Secure
   challenges left unfinished. Several instances can run it side by side (`FOR UPDATE SKIP LOCKED`).
@@ -48,12 +57,13 @@ What it does:
   it; errors are RFC 9457 problem details with a `code`.
 - **Merchants are isolated.** API keys are stored as SHA-256 hashes; a merchant sees only its own payments.
 - **Metrics and traces.** Every service has Prometheus metrics: payments and refunds by outcome and provider,
-  risk-service's answers, webhook deliveries, the circuit breakers, latencies. A Grafana dashboard shows them.
-  OpenTelemetry traces follow a payment from the gateway through risk-service to the provider, and a webhook to the
-  merchant, into Jaeger; every log line carries its trace id.
+  risk-service's answers, webhook deliveries, the circuit breakers, the outbox's lag, what the ledger took,
+  latencies. A Grafana dashboard shows them. OpenTelemetry traces follow a payment from the gateway through
+  risk-service to the provider, a webhook to the merchant, and the payment's event to the ledger, into Jaeger; every
+  log line carries its trace id.
 - **Kubernetes, per environment.** One Helm chart, with values for dev, staging and production. Staging runs two
-  gateways and two risk-services, the gateways autoscaled, and a rollout loses no payment; production takes managed
-  PostgreSQL and Redis and the real monobank. Each pod reaches only what it needs (network policies), meets the
+  gateways, two risk-services and two ledgers, the gateways autoscaled, and a rollout loses no payment; production
+  takes managed PostgreSQL, Redis and Kafka and the real monobank. Each pod reaches only what it needs (network policies), meets the
   restricted Pod Security Standard and is probed on a management port the Ingress doesn't route.
 - **Quality gates in the pipeline.** Every push is built and tested, with 80 % line coverage per module, SpotBugs
   and FindSecBugs over the classes, the chart checked for every environment against Kubernetes' schemas, the whole
@@ -63,17 +73,18 @@ What it does:
 
 ## Stack
 
-Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis, gRPC), Protocol Buffers,
-PostgreSQL 17, Redis 8, Resilience4j, Micrometer, OpenTelemetry, Prometheus, Grafana, Jaeger, OpenAPI Generator,
-springdoc, JUnit 6, WireMock, Testcontainers, JaCoCo, SpotBugs, FindSecBugs, Docker, Kubernetes, Helm, k3d,
-kubeconform, gitleaks, Trivy, GitLab CI and its container registry.
+Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis, gRPC, Kafka), Protocol
+Buffers, PostgreSQL 17, Redis 8, Apache Kafka 4 (KRaft), CloudEvents, AsyncAPI, Resilience4j, Micrometer,
+OpenTelemetry, Prometheus, Grafana, Jaeger, OpenAPI Generator, springdoc, JUnit 6, WireMock, Testcontainers, JaCoCo,
+SpotBugs, FindSecBugs, Docker, Kubernetes, Helm, k3d, kubeconform, gitleaks, Trivy, GitLab CI and its container
+registry.
 
 ## Run it
 
 Needs Java 21 and Docker.
 
-1. Build and test. This runs the unit tests, the integration tests against PostgreSQL and Redis in Testcontainers,
-   and the coverage gate:
+1. Build and test. This runs the unit tests, the integration tests against PostgreSQL, Redis and Kafka in
+   Testcontainers, and the coverage gate:
 
    ```bash
    ./mvnw verify
@@ -85,16 +96,16 @@ Needs Java 21 and Docker.
    printf 'GATEWAY_DEMO_MERCHANT_API_KEY=%s\nGATEWAY_FINGERPRINT_KEY=%s\nACQUIRER_SIM_API_KEY=%s\nGATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET=whsec_%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)" "$(openssl rand -hex 16)" "$(openssl rand -base64 32)" > .env
    ```
 
-   The demo uses ports 8090 (gateway), 8091 (acquirer-sim), 8093 (monobank-sim), 8092 (merchant-sim), 5436
-   (PostgreSQL), 3000 (Grafana), 9090 (Prometheus) and 16686 (Jaeger) on localhost. If one is taken, pick others in
-   `.env` and use them in the URLs below, for example:
+   The demo uses ports 8090 (gateway), 8091 (acquirer-sim), 8093 (monobank-sim), 8092 (merchant-sim), 8095
+   (ledger-service), 5436 (PostgreSQL), 3000 (Grafana), 9090 (Prometheus) and 16686 (Jaeger) on localhost. If one is
+   taken, pick others in `.env` and use them in the URLs below, for example:
 
    ```bash
-   printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nMONOBANK_SIM_PORT=8193\nMERCHANT_SIM_PORT=8192\nGATEWAY_DB_PORT=5446\nGRAFANA_PORT=8194\nPROMETHEUS_PORT=8195\nJAEGER_PORT=8196\n' >> .env
+   printf 'GATEWAY_PORT=8190\nACQUIRER_SIM_PORT=8191\nMONOBANK_SIM_PORT=8193\nMERCHANT_SIM_PORT=8192\nLEDGER_PORT=8197\nGATEWAY_DB_PORT=5446\nGRAFANA_PORT=8194\nPROMETHEUS_PORT=8195\nJAEGER_PORT=8196\n' >> .env
    ```
 
-3. Start the gateway, risk-service, both simulated providers, merchant-sim, PostgreSQL, Redis, Prometheus, Grafana
-   and Jaeger:
+3. Start the gateway, risk-service, ledger-service, both simulated providers, merchant-sim, PostgreSQL (one for the
+   gateway, one for the ledger), Redis, Kafka, Prometheus, Grafana and Jaeger:
 
    ```bash
    docker compose up -d --build
@@ -154,6 +165,19 @@ Needs Java 21 and Docker.
    with another amount gets 422 `IDEMPOTENCY_KEY_REUSED`. A payment acquirer-sim charged, as in the next step, is
    refunded by acquirer-sim, which decides at once.
 
+   The ledger booked both, from their events on Kafka: the payment as owed by monobank to the merchant, the refund
+   the other way, 150.00 paid less 50.00 refunded:
+
+   ```bash
+   curl -s -w '\n' http://localhost:8095/api/v1/payments/PAYMENT_ID
+   ```
+
+   Its `merchantId` gives the merchant's balance in each currency:
+
+   ```bash
+   curl -s -w '\n' http://localhost:8095/api/v1/merchants/MERCHANT_ID/balances
+   ```
+
 8. Take monobank away, then pay as in step 4 with a new `Idempotency-Key`:
 
    ```bash
@@ -193,10 +217,25 @@ Needs Java 21 and Docker.
    `docker compose start risk-service` brings it back; within 30 s, once its circuit lets payments through again,
    they are checked again.
 
-10. Look at what the steps did. Grafana, at http://localhost:3000, opens on the payment-gateway dashboard: payments
-    and refunds by outcome and provider, latencies, the providers' circuits, risk-service's answers and the webhook
-    deliveries. In Jaeger, at http://localhost:16686, pick gateway-service and **Find Traces**: a payment's trace
-    shows the request, the risk check in risk-service and the charge at monobank-sim. Prometheus is at
+10. Take Kafka away, and pay as in step 4 with a new `Idempotency-Key`:
+
+    ```bash
+    docker compose stop kafka
+    ```
+
+    The payment succeeds as before: its events wait in the gateway's outbox, which `docker compose logs gateway`
+    says it can't empty, and the ledger has nothing on it yet (404). Start Kafka again, and within half a minute the
+    events go out and the ledger books the payment:
+
+    ```bash
+    docker compose start kafka
+    ```
+
+11. Look at what the steps did. Grafana, at http://localhost:3000, opens on the payment-gateway dashboard: payments
+    and refunds by outcome and provider, latencies, the providers' circuits, risk-service's answers, the webhook
+    deliveries, the events to Kafka, the outbox's lag and what the ledger took. In Jaeger, at http://localhost:16686, pick gateway-service and **Find Traces**: a payment's trace
+    shows the request, the risk check in risk-service, the charge at monobank-sim and, once its event is
+    published, the ledger booking it. Prometheus is at
     http://localhost:9090, its targets under **Status**. A log line shows its trace id in `[traceId-spanId]`, so one
     payment's lines can be found in both services:
 
@@ -238,8 +277,10 @@ production is an example the pipeline checks and nothing installs:
 |-------------------|-----------------------------|------------------------------------|-------------------------------------|
 | gateway           | 1 pod                       | 2 to 4 by CPU, a disruption budget | 3 to 10 by CPU, a disruption budget |
 | risk-service      | 1 pod                       | 2, a disruption budget             | 3 to 6 by CPU, a disruption budget  |
+| ledger-service    | 1 pod                       | 2, a disruption budget             | 3, a disruption budget              |
 | providers         | monobank-sim, acquirer-sim  | monobank-sim, acquirer-sim         | monobank                            |
 | PostgreSQL, Redis | in the namespace            | in the namespace                   | managed: Amazon RDS, ElastiCache    |
+| Kafka             | one broker in the namespace | one broker in the namespace        | managed: Amazon MSK                 |
 | reached at        | http://*.dev.localhost:8280 | http://*.staging.localhost:8280    | https://pay.example.com             |
 
 It needs Docker, [k3d](https://k3d.io/stable/#installation) 5.9, [kubectl](https://kubernetes.io/docs/tasks/tools/)
@@ -267,7 +308,8 @@ It needs Docker, [k3d](https://k3d.io/stable/#installation) 5.9, [kubectl](https
    ```
 
 4. Check it end to end. Through the Ingress, as a merchant and a customer's browser would, it pays, replays,
-   refunds and goes through 3-D Secure, and from inside the pods it checks the network policies:
+   refunds and goes through 3-D Secure; it checks that the ledger booked the payment and its refund, and from inside
+   the pods it checks the network policies:
 
    ```bash
    deploy/k3d/smoke-test.sh dev
@@ -285,17 +327,25 @@ It needs Docker, [k3d](https://k3d.io/stable/#installation) 5.9, [kubectl](https
 
    The answer's `nextAction.url` is monobank-sim's challenge page at http://monobank.dev.localhost:8280; confirm
    it, and the browser ends on the shop's page. The API docs are at http://gateway.dev.localhost:8280/swagger-ui.html.
+   No network policy lets anything reach the ledger's API, but a port-forward does:
+
+   ```bash
+   kubectl --context k3d-payment-gateway -n payment-gateway-dev port-forward deploy/ledger-service 8095
+   ```
+
+   and in another terminal `curl -s -w '\n' http://localhost:8095/api/v1/payments/PAYMENT_ID`.
 
 6. Staging goes the same way, with `deploy/k3d/deploy.sh staging` and `deploy/k3d/smoke-test.sh staging`. There the
    smoke test also checks that both risk-service pods get calls, and rolls the gateways over while it pays: no
    payment may be lost.
 
 After a new build, `deploy.sh` again puts it out: images of other jars get a new tag, and the pods are replaced
-one by one. It can also put out the images the pipeline released, from the project's registry on GitLab, which
+one by one. An environment an earlier version made gets what is new, such as the ledger's database password in its
+Secret. It can also put out the images the pipeline released, from the project's registry on GitLab, which
 anyone may pull from, with nothing built here:
 
 ```bash
-IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.8.0 deploy/k3d/deploy.sh staging
+IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.9.2 deploy/k3d/deploy.sh staging
 ```
 
 `IMAGE_TAG` can also be a commit's full SHA: the images the pipeline pushed for that commit. An environment goes,
@@ -362,6 +412,29 @@ in merchant-sim shows how. Any 2xx answer counts as delivered. Anything else, a 
 5 s, 5 min, 30 min, 2 h, 5 h and 10 h, each with up to a tenth more at random, then given up; 410 Gone is given up
 at once. Webhooks can come twice and out of order, so go by the payment's or refund's `status` and `updatedAt`.
 
+## Events
+
+Every status a payment reaches, and every refund's outcome, is also an event on the Kafka topic `payment-events`,
+whether or not the merchant has a webhook endpoint: for services inside the company, such as the ledger. Each is a
+[CloudEvent](https://cloudevents.io) in Kafka's binary mode:
+
+| Part                           | Value                                                                                  |
+|--------------------------------|----------------------------------------------------------------------------------------|
+| key                            | the payment's id, so a payment's events, its refunds' too, stay in order on one partition |
+| `ce_id`                        | the event's id, the same as its webhook's `webhook-id`: deduplicate by it              |
+| `ce_type`                      | `payment.requires_action`, `payment.succeeded`, `payment.declined`, `payment.failed`, `refund.succeeded`, `refund.failed` |
+| `ce_source`, `ce_subject`      | `/payment-gateway`, and the payment's id                                               |
+| `ce_time`                      | when the change was made                                                               |
+| `traceparent`                  | the trace of the request that made the change, when it was traced                      |
+| value                          | the payment's or the refund's data as JSON, with the merchant and the provider        |
+
+Events are published at least once, in order per payment, from an outbox that keeps them while Kafka is down. The
+contract, with examples: [payment-events.yaml](docs/payment-events.yaml) (AsyncAPI 3.0).
+
+ledger-service books what succeeded, and shows it at `GET /api/v1/payments/{id}` (the payment's entries, paid,
+refunded and net) and `GET /api/v1/merchants/{id}/balances` (what is owed to the merchant in each currency). An
+event it can't read waits on `payment-events-ledger-dlt`, its headers saying why.
+
 ## Providers
 
 `GATEWAY_PROVIDERS` lists the providers new payments go to, the preferred one first: `acquirer-sim` when it is not
@@ -415,15 +488,21 @@ gateway counts:
 | `gateway_refunds_total`     | `status`, `provider`, `code`: the failure code, `none` without one                     |
 | `gateway_risk_checks_total` | `answer`: `allowed`, `declined`, `unavailable` (an error, a timeout, its circuit open) |
 | `gateway_webhooks_total`    | `outcome`: `delivered`, `retrying`, `given_up`                                         |
+| `gateway_events_published_total`, `gateway_events_publish_failures_total` | events Kafka took, and publisher runs that failed |
+| `gateway_events_lag_seconds` | how long the oldest event not yet on Kafka has waited in the outbox                   |
 
-risk-service counts `risk_assessments_total` by `decision` and `reason`. Resilience4j publishes the circuit
+risk-service counts `risk_assessments_total` by `decision` and `reason`. ledger-service counts
+`ledger_events_total` by `outcome` (`booked`, `not_booked`, `duplicate`) and `type`, and `ledger_dead_letters_total`;
+Spring Kafka times each event's handling (`spring_kafka_listener_seconds`), and the Kafka clients publish their own
+metrics, the ledger's consumer lag among them. Resilience4j publishes the circuit
 breakers' state and calls (`resilience4j_circuitbreaker_*`, by `name`: each provider, and risk-service), and Spring
 times the gateway's HTTP requests, in and out, and its gRPC calls as histograms, so the dashboard can show
 percentiles.
 
 Every service sends its traces over OTLP to Jaeger, which keeps them in memory, and traces every request, as a demo
 can afford to. The trace context goes along with HTTP and gRPC calls, so one trace covers a payment's request, its
-risk check and its charge. Outside compose, when `MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT` is not set,
+risk check and its charge; an event on Kafka carries it too, so the ledger booking the payment joins that trace.
+Outside compose, when `MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT` is not set,
 traces stay in the service: the gateway's startup log says which it is.
 
 ## Layout
@@ -433,6 +512,7 @@ gateway-service/   the merchant API, 3-D Secure return, webhooks, the risk check
                    connectors
 risk-service/      decides over gRPC whether a payment may go ahead; counts cards' payments in Redis
 risk-api/          the gRPC contract between the two (risk.proto) and the Java code generated from it
+ledger-service/    books the succeeded payments and refunds from the payment-events topic into a double-entry ledger
 acquirer-sim/      the simulated card acquirer with its challenge pages, a separate app with its own API and a
                    monobank-style one
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
@@ -440,7 +520,8 @@ observability/     Prometheus' scrape settings, Grafana's data source and the da
 deploy/            the Helm chart with each environment's values (helm/), the local k3d cluster and its scripts (k3d/)
 ci/                scripts for the pipeline: its tools, the coverage report, the chart's check, the images' build, scan
                    and release, the e2e job's logs
-docs/              setting up GitLab, its runners, its registry and the GitHub mirror
+docs/              the payment-events topic's contract (AsyncAPI); setting up GitLab, its runners, its registry and
+                   the GitHub mirror
 ```
 
 How the parts fit, and why: [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -456,14 +537,14 @@ fails stops the change there.
 | verify  | the build; unit and integration tests; 80 % line coverage per module (JaCoCo); SpotBugs with FindSecBugs | every push |
 | chart   | `helm lint`, every environment's manifests against Kubernetes 1.35's schemas, values the chart must refuse | every push |
 | secrets | every commit, for keys, tokens and passwords (gitleaks)                                 | every push |
-| images  | the four images, for known HIGH or CRITICAL vulnerabilities that have a fix (Trivy); on main they are then pushed to the registry, tagged with the commit | every push |
+| images  | the five images, for known HIGH or CRITICAL vulnerabilities that have a fix (Trivy); on main they are then pushed to the registry, tagged with the commit | every push |
 | e2e     | those images, deployed to a k3d cluster inside the job and checked by `smoke-test.sh`   | main       |
-| release | nothing more: it tags the commit's images with their version, such as `0.8.0`           | main       |
+| release | nothing more: it tags the commit's images with their version, such as `0.9.2`           | main       |
 
 The coverage badge shows gateway-service's line coverage; the pipeline log has the other modules' too. How the
 gates are set, and why: [ARCHITECTURE.md](ARCHITECTURE.md#pipeline).
 
 ## Next
 
-Events over Kafka: the outbox's payment and refund events published to a topic, with a consumer of their own. Then
-the AWS infrastructure `values-prod.yaml` expects, as Terraform, and a load test with measured latencies.
+The AWS infrastructure `values-prod.yaml` expects, as Terraform: the cluster, the databases, Redis and MSK. Then a
+load test with measured latencies.

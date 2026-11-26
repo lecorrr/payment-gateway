@@ -4,8 +4,8 @@
   "description": "Every value the chart reads; a misspelt or unknown key fails helm install, upgrade, lint and template.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["image", "existingSecret", "ingress", "gateway", "riskService", "acquirerSim", "monobankSim",
-    "merchantSim", "postgres", "database", "redis", "tracing", "serviceMonitor", "networkPolicy"],
+  "required": ["image", "existingSecret", "ingress", "gateway", "riskService", "ledger", "acquirerSim", "monobankSim",
+    "merchantSim", "postgres", "database", "redis", "kafka", "tracing", "serviceMonitor", "networkPolicy"],
   "definitions": {
     "host": {
       "type": "string",
@@ -153,6 +153,38 @@
         "podDisruptionBudget": {"$ref": "#/definitions/podDisruptionBudget"}
       }
     },
+    "ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "replicas", "env", "resources", "podDisruptionBudget", "postgres", "database"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "replicas": {"type": "integer", "minimum": 1},
+        "env": {"$ref": "#/definitions/env"},
+        "resources": {"$ref": "#/definitions/resources"},
+        "podDisruptionBudget": {"$ref": "#/definitions/podDisruptionBudget"},
+        "postgres": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "storage", "storageClass", "resources"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "storage": {"$ref": "#/definitions/quantity"},
+            "storageClass": {"type": "string"},
+            "resources": {"$ref": "#/definitions/resources"}
+          }
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "username"],
+          "properties": {
+            "url": {"type": "string", "pattern": "^(jdbc:postgresql://[^\\s]+)?$"},
+            "username": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
     "acquirerSim": {"$ref": "#/definitions/simulator"},
     "monobankSim": {"$ref": "#/definitions/simulator"},
     "merchantSim": {
@@ -198,6 +230,32 @@
         "resources": {"$ref": "#/definitions/resources"}
       }
     },
+    "kafka": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "clusterId", "heap", "storage", "storageClass", "resources", "bootstrapServers",
+        "securityProtocol", "replicationFactor"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string", "minLength": 1},
+        "clusterId": {
+          "description": "A base64url-encoded UUID, 22 characters, as kafka-storage.sh random-uuid prints.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{22}$"
+        },
+        "heap": {"type": "string", "pattern": "^[0-9]+[mg]$"},
+        "storage": {"$ref": "#/definitions/quantity"},
+        "storageClass": {"type": "string"},
+        "resources": {"$ref": "#/definitions/resources"},
+        "bootstrapServers": {
+          "description": "host:port of one or more brokers, separated by commas.",
+          "type": "string",
+          "pattern": "^([a-z0-9.-]+:[0-9]{1,5}(,[a-z0-9.-]+:[0-9]{1,5})*)?$"
+        },
+        "securityProtocol": {"enum": ["PLAINTEXT", "SSL"]},
+        "replicationFactor": {"type": "integer", "minimum": 1, "maximum": 5}
+      }
+    },
     "tracing": {
       "type": "object",
       "additionalProperties": false,
@@ -219,7 +277,8 @@
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "ingressController", "monitoringNamespace", "gatewayEgress", "riskServiceEgress"],
+      "required": ["enabled", "ingressController", "monitoringNamespace", "gatewayEgress", "riskServiceEgress",
+        "ledgerEgress"],
       "properties": {
         "enabled": {"type": "boolean"},
         "ingressController": {
@@ -233,7 +292,8 @@
         },
         "monitoringNamespace": {"type": "string"},
         "gatewayEgress": {"$ref": "#/definitions/egressRules"},
-        "riskServiceEgress": {"$ref": "#/definitions/egressRules"}
+        "riskServiceEgress": {"$ref": "#/definitions/egressRules"},
+        "ledgerEgress": {"$ref": "#/definitions/egressRules"}
       }
     }
   }

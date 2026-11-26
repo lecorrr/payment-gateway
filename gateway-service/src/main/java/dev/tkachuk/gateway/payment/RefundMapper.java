@@ -5,6 +5,7 @@ import dev.tkachuk.gateway.api.model.RefundEventDto;
 import dev.tkachuk.gateway.api.model.RefundEventTypeDto;
 import dev.tkachuk.gateway.api.model.RefundResponseDto;
 import dev.tkachuk.gateway.api.model.RefundStatusDto;
+import dev.tkachuk.gateway.event.RefundEventData;
 import java.time.ZoneOffset;
 
 /** Between the generated API types and refunds. Enums map by name; RefundMapperTest keeps both sides equal. */
@@ -33,6 +34,13 @@ final class RefundMapper {
                 .type(eventTypeOf(refund.status()))
                 .timestamp(refund.updatedAt().atOffset(ZoneOffset.UTC))
                 .data(toResponse(refund));
+    }
+
+    /** The data of the refund's event on the payment-events topic, for its outcome. */
+    static RefundEventData toEventData(Refund refund) {
+        return new RefundEventData(refund.id(), refund.paymentId(), refund.merchantId(), refund.status().name(),
+                refund.amount(), refund.currency(), refund.provider(), refund.providerReference(),
+                refund.failureCode(), refund.updatedAt());
     }
 
     static RefundEventTypeDto eventTypeOf(RefundStatus status) {

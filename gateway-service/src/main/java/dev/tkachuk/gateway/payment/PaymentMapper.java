@@ -17,6 +17,7 @@ import dev.tkachuk.gateway.card.Cvc;
 import dev.tkachuk.gateway.common.Currency;
 import dev.tkachuk.gateway.common.error.ErrorCode;
 import dev.tkachuk.gateway.common.error.GatewayException;
+import dev.tkachuk.gateway.event.PaymentEventData;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.ZoneOffset;
@@ -71,6 +72,13 @@ final class PaymentMapper {
                 .type(eventTypeOf(payment.status()))
                 .timestamp(payment.updatedAt().atOffset(ZoneOffset.UTC))
                 .data(toResponse(payment));
+    }
+
+    /** The data of the payment's event on the payment-events topic, for its current status, which is not PROCESSING. */
+    static PaymentEventData toEventData(Payment payment) {
+        return new PaymentEventData(payment.id(), payment.merchantId(), payment.orderId(), payment.status().name(),
+                payment.amount(), payment.currency(), payment.provider(), payment.providerReference(),
+                payment.declineCode(), payment.refundedAmount(), payment.updatedAt());
     }
 
     static PaymentEventTypeDto eventTypeOf(PaymentStatus status) {

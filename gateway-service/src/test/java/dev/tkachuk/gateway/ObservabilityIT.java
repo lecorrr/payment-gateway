@@ -9,7 +9,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * What Prometheus scrapes from /actuator/prometheus once a payment went through: the gateway's own counters, the
- * providers' circuits, and the latency buckets of the API and of the calls to providers. No API key is needed.
+ * providers' circuits, the event publisher's, and the latency buckets of the API and of the calls to providers. No
+ * API key is needed.
  */
 class ObservabilityIT extends IntegrationTest {
 
@@ -26,6 +27,8 @@ class ObservabilityIT extends IntegrationTest {
                 .containsPattern("gateway_risk_checks_total\\{answer=\"allowed\"[^}]*}")
                 .containsPattern("resilience4j_circuitbreaker_state\\{[^}]*name=\"acquirer-sim\"[^}]*state=\"closed\"")
                 .containsPattern("resilience4j_circuitbreaker_state\\{[^}]*name=\"risk-service\"")
+                .contains("gateway_events_published_total")
+                .contains("gateway_events_lag_seconds")
                 .contains("http_server_requests_seconds_bucket")
                 .contains("http_client_requests_seconds_bucket");
     }

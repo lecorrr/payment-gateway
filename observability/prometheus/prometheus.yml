@@ -13,6 +13,10 @@ scrape_configs:
     metrics_path: /actuator/prometheus
     static_configs:
       - targets: ["risk-service:8094"]
+  - job_name: ledger-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["ledger-service:8095"]
   - job_name: acquirer-sim
     metrics_path: /actuator/prometheus
     static_configs:

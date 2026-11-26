@@ -4,6 +4,7 @@ import dev.tkachuk.gateway.card.CardExpiry;
 import dev.tkachuk.gateway.card.CardNumber;
 import dev.tkachuk.gateway.common.error.ErrorCode;
 import dev.tkachuk.gateway.common.error.GatewayException;
+import dev.tkachuk.gateway.event.EventOutbox;
 import dev.tkachuk.gateway.provider.ChargeLookup;
 import dev.tkachuk.gateway.provider.ChargeNotifications;
 import dev.tkachuk.gateway.provider.ChargeRequest;
@@ -57,13 +58,14 @@ public class PaymentService implements ChargeNotifications {
     private final ProviderRouter router;
     private final RiskCheck riskCheck;
     private final WebhookOutbox webhooks;
+    private final EventOutbox events;
     private final TransactionTemplate transactions;
     private final PaymentMetrics metrics;
     private final PaymentProperties properties;
     private final Clock clock;
 
     PaymentService(PaymentRepository payments, RequestFingerprints fingerprints, ProviderConnectors providers,
-            ProviderRouter router, RiskCheck riskCheck, WebhookOutbox webhooks,
+            ProviderRouter router, RiskCheck riskCheck, WebhookOutbox webhooks, EventOutbox events,
             PlatformTransactionManager transactionManager, PaymentMetrics metrics, PaymentProperties properties,
             Clock clock) {
         this.payments = payments;
@@ -72,6 +74,7 @@ public class PaymentService implements ChargeNotifications {
         this.router = router;
         this.riskCheck = riskCheck;
         this.webhooks = webhooks;
+        this.events = events;
         this.transactions = new TransactionTemplate(transactionManager);
         this.metrics = metrics;
         this.properties = properties;
@@ -353,16 +356,24 @@ public class PaymentService implements ChargeNotifications {
     }
 
     /**
-     * Writes a status change and its webhook event in one transaction, so the event exists exactly when the change
-     * does. An empty change means another writer was first; then there is no event either.
+     * Writes a status change and its events, for the merchant's webhook and for the payment-events topic, in one
+     * transaction, so the events exist exactly when the change does. An empty change means another writer was
+     * first; then there are no events either.
      */
     private Optional<Payment> changeStatus(Supplier<Optional<Payment>> change) {
         return transactions.execute(transaction -> {
             Optional<Payment> changed = change.get();
-            changed.ifPresent(payment -> webhooks.add(payment.merchantId(), payment.id(),
-                    PaymentMapper.eventTypeOf(payment.status()).getValue(), PaymentMapper.toEvent(payment)));
+            changed.ifPresent(this::addEvents);
             return changed;
         });
+    }
+
+    // One change, one event id, on both channels.
+    private void addEvents(Payment payment) {
+        UUID eventId = UUID.randomUUID();
+        String type = PaymentMapper.eventTypeOf(payment.status()).getValue();
+        webhooks.add(eventId, payment.merchantId(), payment.id(), type, PaymentMapper.toEvent(payment));
+        events.add(eventId, payment.id(), type, payment.updatedAt(), PaymentMapper.toEventData(payment));
     }
 
     private Payment current(Payment payment) {

@@ -3,8 +3,9 @@
 # next to this one hold what each environment changes: values-dev.yaml and values-staging.yaml for the k3d cluster
 # of deploy/k3d, values-prod.yaml for an example production cluster. values.schema.json checks every value.
 
-# The four apps' images: gateway-service, risk-service, acquirer-sim (also monobank-sim) and merchant-sim. With no
-# registry, the images are the ones loaded into the nodes, as deploy/k3d/deploy.sh does with k3d image import.
+# The five apps' images: gateway-service, risk-service, ledger-service, acquirer-sim (also monobank-sim) and
+# merchant-sim. With no registry, the images are the ones loaded into the nodes, as deploy/k3d/deploy.sh does with
+# k3d image import.
 image:
   registry: ""
   # Empty: the chart's appVersion.
@@ -16,6 +17,7 @@ image:
 # uninstalled, as the database does. Its keys:
 #   GATEWAY_FINGERPRINT_KEY               always: the secret of the request fingerprints, 32+ characters
 #   DB_PASSWORD                           always: the gateway's database password, and the in-cluster PostgreSQL's
+#   LEDGER_DB_PASSWORD                    with the ledger: its database password, and the in-cluster one's
 #   ACQUIRER_SIM_API_KEY                  with the simulators: their key, which is the gateway's token at monobank-sim
 #   GATEWAY_MONOBANK_TOKEN                with the real monobank: the merchant's token
 #   GATEWAY_DEMO_MERCHANT_API_KEY         optional: without it there is no demo merchant
@@ -86,6 +88,39 @@ riskService:
     enabled: false
     minAvailable: 1
 
+# ledger-service: books every payment and refund that succeeded into a double-entry ledger of its own, from the
+# payment-events topic. Each of the topic's three partitions is read by one replica at a time, so replicas past
+# three only stand by.
+ledger:
+  enabled: true
+  replicas: 1
+  env: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      memory: 768Mi
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  # PostgreSQL in the namespace for the ledger alone, as postgres is the gateway's; its data stays in a volume claim
+  # when the release is uninstalled. With enabled false, the ledger uses database.url.
+  postgres:
+    enabled: true
+    storage: 1Gi
+    storageClass: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+  database:
+    # With postgres.enabled false: the JDBC URL of the ledger's database.
+    url: ""
+    username: ledger
+
 # The simulated card acquirer, which the gateway charges through as acquirer-sim. Each simulator keeps its state in
 # memory, so it runs as one pod, replaced rather than rolled.
 acquirerSim:
@@ -155,6 +190,33 @@ redis:
     limits:
       memory: 256Mi
 
+# Kafka in the namespace, for the payment-events topic: a single broker that is its own controller (KRaft), with
+# its data in a volume claim that stays when the release is uninstalled. With enabled false, the gateway and the
+# ledger use bootstrapServers, such as Amazon MSK's.
+kafka:
+  enabled: true
+  # The same tag as compose.yaml and kafka.image in pom.xml.
+  image: apache/kafka:4.2.2
+  # Written into the volume at the first start: with another id, the broker would refuse the data it has.
+  clusterId: 4AogIrPwRFuE_IXYvZfMDQ
+  # The broker's heap; the memory limit leaves room for the rest of the JVM.
+  heap: 256m
+  storage: 1Gi
+  # Empty: the cluster's default storage class (local-path on k3d).
+  storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  # With enabled false: the brokers, as host:port separated by commas, and how the apps reach them, PLAINTEXT or
+  # SSL. With enabled true, PLAINTEXT.
+  bootstrapServers: ""
+  securityProtocol: PLAINTEXT
+  # The replicas of each topic the apps make: 1 on the single broker of the namespace, 3 on a cluster of three.
+  replicationFactor: 1
+
 # Where every app sends its traces over OTLP/HTTP, such as an OpenTelemetry Collector's
 # http://otel-collector.observability:4318/v1/traces; empty: none are sent.
 tracing:
@@ -169,8 +231,8 @@ serviceMonitor:
   labels: {}
 
 # Nothing reaches a pod, and a pod reaches nothing, except what the apps need: the ingress controller the HTTP ports
-# browsers use, the gateway its database, Redis, risk-service and the simulators, monobank-sim the gateway's
-# webhooks, and so on (templates/network-policies.yaml). Every pod may look names up in the cluster's DNS.
+# browsers use, the gateway its database, Redis, Kafka, risk-service and the simulators, the ledger Kafka and its own
+# database, and so on (templates/network-policies.yaml). Every pod may look names up in the cluster's DNS.
 networkPolicy:
   enabled: true
   # The ingress controller's pods: Traefik in kube-system on k3s.
@@ -180,7 +242,8 @@ networkPolicy:
       app.kubernetes.io/name: traefik
   # The namespace whose pods (Prometheus) may scrape the management ports; empty: none.
   monitoringNamespace: ""
-  # Where else the gateway and risk-service may connect, such as monobank's API, a managed database or a collector:
-  # NetworkPolicy egress rules, used as they are.
+  # Where else the gateway, risk-service and the ledger may connect, such as monobank's API, a managed database,
+  # Kafka or a collector: NetworkPolicy egress rules, used as they are.
   gatewayEgress: []
   riskServiceEgress: []
+  ledgerEgress: []

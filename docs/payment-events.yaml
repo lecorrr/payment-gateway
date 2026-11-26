@@ -1,0 +1,284 @@
+asyncapi: 3.0.0
+info:
+  title: payment-gateway events
+  version: 0.9.0
+  description: |
+    Every status a payment or refund reaches, published by gateway-service for other services to act on; the ledger
+    (ledger-service) books them. They are the same changes merchants get by webhook, with the merchant and the
+    provider added, which a merchant's own webhook leaves out.
+
+    Each event is a Kafka record in the binary mode of the CloudEvents Kafka binding: its data is the record's value,
+    as JSON, and its attributes are `ce_` headers. The record's key is the payment's id, so all of a payment's events,
+    its refunds' too, are in one partition, in the order they happened.
+
+    Delivery is at least once: an event can come again, with the same `ce_id`, and a consumer must take it once. A
+    consumer ignores the types it doesn't know and the fields it doesn't know, which may be added. Amounts are in
+    minor units.
+servers:
+  local:
+    host: kafka:9092
+    protocol: kafka
+    description: The broker of compose.yaml and of the chart's dev and staging environments.
+channels:
+  paymentEvents:
+    address: payment-events
+    description: Three partitions in dev and staging; the gateway makes the topic when it first publishes.
+    messages:
+      paymentEvent:
+        $ref: '#/components/messages/paymentEvent'
+      refundEvent:
+        $ref: '#/components/messages/refundEvent'
+operations:
+  publishPaymentEvents:
+    action: send
+    channel:
+      $ref: '#/channels/paymentEvents'
+    summary: gateway-service publishes each event from its outbox, once the change it reports is committed.
+    messages:
+      - $ref: '#/channels/paymentEvents/messages/paymentEvent'
+      - $ref: '#/channels/paymentEvents/messages/refundEvent'
+  bookPaymentEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/paymentEvents'
+    summary: ledger-service, consumer group ledger, books succeeded payments and refunds.
+    messages:
+      - $ref: '#/channels/paymentEvents/messages/paymentEvent'
+      - $ref: '#/channels/paymentEvents/messages/refundEvent'
+components:
+  messages:
+    paymentEvent:
+      name: payment event
+      title: A payment reached a status
+      contentType: application/json
+      headers:
+        $ref: '#/components/schemas/paymentEventHeaders'
+      payload:
+        $ref: '#/components/schemas/paymentEventData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: The payment's id.
+      examples:
+        - name: payment.succeeded
+          headers:
+            ce_specversion: '1.0'
+            ce_id: 6f1c2b7e-3a5d-4b8e-9c0f-1a2b3c4d5e6f
+            ce_source: /payment-gateway
+            ce_type: payment.succeeded
+            ce_time: '2026-11-26T09:15:02.481233Z'
+            ce_subject: 0d7f5e2a-8c41-4c1b-9a6e-5b3f2d1c0e9a
+            content-type: application/json
+          payload:
+            paymentId: 0d7f5e2a-8c41-4c1b-9a6e-5b3f2d1c0e9a
+            merchantId: 3b9d6c4e-1f2a-4e5b-8c7d-9e0f1a2b3c4d
+            orderId: ORDER-1001
+            status: SUCCEEDED
+            amount: 15000
+            currency: UAH
+            provider: monobank
+            providerReference: 2603261234567AbCdEf
+            declineCode: null
+            refundedAmount: 0
+            occurredAt: '2026-11-26T09:15:02.481233Z'
+        - name: payment.declined
+          headers:
+            ce_specversion: '1.0'
+            ce_id: 7a2d3c8f-4b6e-4c9f-8d1a-2b3c4d5e6f70
+            ce_source: /payment-gateway
+            ce_type: payment.declined
+            ce_time: '2026-11-26T09:16:40.002117Z'
+            ce_subject: 9e8d7c6b-5a49-4382-9170-6f5e4d3c2b1a
+            content-type: application/json
+          payload:
+            paymentId: 9e8d7c6b-5a49-4382-9170-6f5e4d3c2b1a
+            merchantId: 3b9d6c4e-1f2a-4e5b-8c7d-9e0f1a2b3c4d
+            orderId: ORDER-1002
+            status: DECLINED
+            amount: 15000
+            currency: UAH
+            provider: acquirer-sim
+            providerReference: ch_8b1f6e2d
+            declineCode: insufficient_funds
+            refundedAmount: 0
+            occurredAt: '2026-11-26T09:16:40.002117Z'
+    refundEvent:
+      name: refund event
+      title: A refund ended
+      contentType: application/json
+      headers:
+        $ref: '#/components/schemas/refundEventHeaders'
+      payload:
+        $ref: '#/components/schemas/refundEventData'
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: The id of the payment the refund is of.
+      examples:
+        - name: refund.succeeded
+          headers:
+            ce_specversion: '1.0'
+            ce_id: 8b3e4d9a-5c7f-4dab-9e2b-3c4d5e6f7081
+            ce_source: /payment-gateway
+            ce_type: refund.succeeded
+            ce_time: '2026-11-26T09:20:11.730004Z'
+            ce_subject: 0d7f5e2a-8c41-4c1b-9a6e-5b3f2d1c0e9a
+            content-type: application/json
+          payload:
+            refundId: 4c5d6e7f-8091-4a2b-b3c4-d5e6f7081920
+            paymentId: 0d7f5e2a-8c41-4c1b-9a6e-5b3f2d1c0e9a
+            merchantId: 3b9d6c4e-1f2a-4e5b-8c7d-9e0f1a2b3c4d
+            status: SUCCEEDED
+            amount: 5000
+            currency: UAH
+            provider: monobank
+            providerReference: 2603269876543ZyXwVu
+            failureCode: null
+            occurredAt: '2026-11-26T09:20:11.730004Z'
+  schemas:
+    paymentEventHeaders:
+      type: object
+      required: [ce_specversion, ce_id, ce_source, ce_type, ce_time, ce_subject, content-type]
+      properties:
+        ce_specversion:
+          type: string
+          const: '1.0'
+        ce_id:
+          type: string
+          format: uuid
+          description: >-
+            The event's id, the same as the webhook-id of its webhook. The same event delivered again has the same
+            id.
+        ce_source:
+          type: string
+          const: /payment-gateway
+        ce_type:
+          type: string
+          enum: [payment.requires_action, payment.succeeded, payment.declined, payment.failed]
+        ce_time:
+          type: string
+          format: date-time
+          description: When the change was made.
+        ce_subject:
+          type: string
+          format: uuid
+          description: The payment's id.
+        content-type:
+          type: string
+          const: application/json
+        traceparent:
+          type: string
+          description: The W3C trace context of the request that made the change, when it was traced.
+    refundEventHeaders:
+      type: object
+      required: [ce_specversion, ce_id, ce_source, ce_type, ce_time, ce_subject, content-type]
+      properties:
+        ce_specversion:
+          type: string
+          const: '1.0'
+        ce_id:
+          type: string
+          format: uuid
+          description: >-
+            The event's id, the same as the webhook-id of its webhook. The same event delivered again has the same
+            id.
+        ce_source:
+          type: string
+          const: /payment-gateway
+        ce_type:
+          type: string
+          enum: [refund.succeeded, refund.failed]
+        ce_time:
+          type: string
+          format: date-time
+          description: When the refund ended.
+        ce_subject:
+          type: string
+          format: uuid
+          description: The id of the payment the refund is of.
+        content-type:
+          type: string
+          const: application/json
+        traceparent:
+          type: string
+          description: The W3C trace context of the request or check that ended the refund, when it was traced.
+    paymentEventData:
+      type: object
+      required: [paymentId, merchantId, orderId, status, amount, currency, provider, refundedAmount, occurredAt]
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        merchantId:
+          type: string
+          format: uuid
+        orderId:
+          type: string
+          description: The merchant's own reference for the order.
+        status:
+          type: string
+          enum: [REQUIRES_ACTION, SUCCEEDED, DECLINED, FAILED]
+        amount:
+          type: integer
+          minimum: 1
+          description: In minor units.
+        currency:
+          type: string
+          enum: [UAH, USD, EUR]
+        provider:
+          type: string
+          enum: [acquirer-sim, monobank]
+          description: The provider that has the charge.
+        providerReference:
+          type: [string, 'null']
+          description: The provider's own id for the charge, when it gave one.
+        declineCode:
+          type: [string, 'null']
+          description: Why a DECLINED or FAILED payment didn't go through, as the API's codes.
+        refundedAmount:
+          type: integer
+          minimum: 0
+          description: What its succeeded refunds gave back so far, in minor units.
+        occurredAt:
+          type: string
+          format: date-time
+    refundEventData:
+      type: object
+      required: [refundId, paymentId, merchantId, status, amount, currency, provider, occurredAt]
+      properties:
+        refundId:
+          type: string
+          format: uuid
+        paymentId:
+          type: string
+          format: uuid
+        merchantId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [SUCCEEDED, FAILED]
+        amount:
+          type: integer
+          minimum: 1
+          description: In minor units, in the payment's currency.
+        currency:
+          type: string
+          enum: [UAH, USD, EUR]
+        provider:
+          type: string
+          enum: [acquirer-sim, monobank]
+          description: The provider that refunded it, which is the one that charged the payment.
+        providerReference:
+          type: [string, 'null']
+          description: The provider's own id for the refund, when it gave one.
+        failureCode:
+          type: [string, 'null']
+          description: Why a FAILED refund didn't go through.
+        occurredAt:
+          type: string
+          format: date-time

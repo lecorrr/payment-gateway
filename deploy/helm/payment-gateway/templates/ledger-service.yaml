@@ -1,0 +1,94 @@
+{{- if .Values.ledger.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-service
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "ledger-service") | nindent 4 }}
+spec:
+  replicas: {{ .Values.ledger.replicas }}
+  selector:
+    matchLabels:
+      {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "ledger-service") | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "payment-gateway.labels" (dict "root" $ "name" "ledger-service") | nindent 8 }}
+    spec:
+      {{- include "payment-gateway.podDefaults" . | nindent 6 }}
+      securityContext:
+        {{- include "payment-gateway.podSecurityContext" (dict "uid" 10001 "gid" 10001) | nindent 8 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "ledger-service") | nindent 14 }}
+      # The preStop wait, then the event in hand, booked and committed, before the consumer leaves its group.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: ledger-service
+          image: {{ include "payment-gateway.image" (dict "root" $ "name" "ledger-service") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            # The internal API. No policy lets anything in, so it is looked at through kubectl port-forward.
+            - name: http
+              containerPort: 8095
+            - name: management
+              containerPort: 8081
+          env:
+            {{- include "payment-gateway.springEnv" . | nindent 12 }}
+            {{- if .Values.ledger.postgres.enabled }}
+            - name: DB_URL
+              value: jdbc:postgresql://ledger-postgres:5432/ledger
+            {{- else }}
+            - name: DB_URL
+              value: {{ required "ledger.database.url is needed when ledger.postgres.enabled is false" .Values.ledger.database.url | quote }}
+            {{- end }}
+            - name: DB_USER
+              value: {{ .Values.ledger.database.username | quote }}
+            {{- include "payment-gateway.secretEnv" (dict "root" $ "name" "DB_PASSWORD" "key" "LEDGER_DB_PASSWORD") | nindent 12 }}
+            {{- include "payment-gateway.kafkaEnv" . | nindent 12 }}
+            - name: LEDGER_REPLICAS
+              value: {{ .Values.kafka.replicationFactor | int | quote }}
+            {{- range $name, $value := .Values.ledger.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- include "payment-gateway.springProbes" . | nindent 10 }}
+          {{- include "payment-gateway.springShutdown" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.ledger.resources | nindent 12 }}
+          securityContext:
+            {{- include "payment-gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-service
+  labels:
+    {{- include "payment-gateway.labels" (dict "root" $ "name" "ledger-service") | nindent 4 }}
+spec:
+  selector:
+    {{- include "payment-gateway.selectorLabels" (dict "root" $ "name" "ledger-service") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8095
+      targetPort: http
+    # Health, info and Prometheus' metrics, for the probes and Prometheus.
+    - name: management
+      port: 8081
+      targetPort: management
+{{- end }}

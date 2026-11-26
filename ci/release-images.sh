@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# The pipeline's release job: gives the commit's four images, which passed every job before this one, the version
-# they were built as too: $CI_REGISTRY_IMAGE/<app>:$CI_COMMIT_SHA gets the tag $APP_VERSION (such as 0.8.0) from the
+# The pipeline's release job: gives the commit's five images, which passed every job before this one, the version
+# they were built as too: $CI_REGISTRY_IMAGE/<app>:$CI_COMMIT_SHA gets the tag $APP_VERSION (such as 0.9.2) from the
 # images job. The images are only tagged again, not built again, so the version is exactly what the checks saw. A
 # version names one build: an image that has the version's tag already keeps it.
 #
 #   bash ci/release-images.sh
 set -euo pipefail
 
-apps=(gateway-service risk-service acquirer-sim merchant-sim)
+apps=(gateway-service risk-service ledger-service acquirer-sim merchant-sim)
 registry="${CI_REGISTRY_IMAGE:?GitLab sets CI_REGISTRY_IMAGE; this script is the pipeline release job}"
 commit="${CI_COMMIT_SHA:?GitLab sets CI_COMMIT_SHA; this script is the pipeline release job}"
 version="${APP_VERSION:?APP_VERSION comes from the images job, through its images.env}"

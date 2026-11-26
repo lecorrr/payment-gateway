@@ -27,10 +27,11 @@ class LayeringTest {
             "common", Set.of(),
             "card", Set.of("common"),
             "webhook", Set.of("common"),
+            "event", Set.of("common"),
             "merchant", Set.of("common", "webhook"),
             "provider", Set.of("common", "card"),
             "risk", Set.of("common"),
-            "payment", Set.of("common", "card", "merchant", "provider", "risk", "webhook", "api"));
+            "payment", Set.of("common", "card", "merchant", "provider", "risk", "webhook", "event", "api"));
 
     private static List<SourceFile> sources;
 

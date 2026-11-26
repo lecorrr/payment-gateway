@@ -1,4 +1,7 @@
 {{- $urls := list "http://gateway:8081/actuator/health/readiness" "http://risk-service:8094/actuator/health/readiness" }}
+{{- if .Values.ledger.enabled }}
+{{- $urls = append $urls "http://ledger-service:8081/actuator/health/readiness" }}
+{{- end }}
 {{- if .Values.acquirerSim.enabled }}
 {{- $urls = append $urls "http://acquirer-sim:8081/actuator/health/readiness" }}
 {{- end }}

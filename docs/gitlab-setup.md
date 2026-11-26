@@ -89,20 +89,20 @@ the mirror and add it again.
 
 ## 5. Container registry
 
-On main, the `images` job pushes the four apps' images to the project's own container registry, tagged with the
+On main, the `images` job pushes the five apps' images to the project's own container registry, tagged with the
 commit's SHA, and once every check has passed the `release` job gives them the version from `pom.xml` too:
-`registry.gitlab.com/lecorrr/payment-gateway/gateway-service:0.8.0`, as `values-prod.yaml` names them. The jobs
+`registry.gitlab.com/lecorrr/payment-gateway/gateway-service:0.9.2`, as `values-prod.yaml` names them. The jobs
 sign in with the job's own token, so there is nothing to set up for that. **Deploy > Container registry** lists the
 images and their tags.
 
 - **Who can pull.** In a public project anyone can, without signing in, which is what lets a cluster or a laptop
   run a released version as it is (the README's Kubernetes section says how). **Settings > General > Visibility,
   project features, permissions > Container registry** can limit it to project members.
-- **Old tags.** Every push to main adds four commit tags. A cleanup policy removes the old ones and keeps the
+- **Old tags.** Every push to main adds five commit tags. A cleanup policy removes the old ones and keeps the
   versions: **Settings > Packages and registries > Container registry > Set cleanup rules**, with the policy on,
   **Run cleanup** every week, **Keep the most recent** 5 tags per image, **Keep tags matching** `\d+\.\d+\.\d+`,
   **Remove tags older than** 14 days and **Remove tags matching** `.*`. GitLab reads the patterns as whole tags, so
-  `\d+\.\d+\.\d+` keeps `0.8.0` and nothing longer. **Settings > Usage quotas** shows the registry's size.
+  `\d+\.\d+\.\d+` keeps `0.9.2` and nothing longer. **Settings > Usage quotas** shows the registry's size.
 - **Releases.** A version is released once: a later commit with the same version in `pom.xml` keeps only its commit
   tag, and the `release` job says so. Raise the version to release again.
 

@@ -26,6 +26,15 @@ helm template payment-gateway "$chart" --namespace payment-gateway-dev --values 
     --set image.tag=0123456789abcdef0123456789abcdef01234567 --kube-version "$kubernetes_version" \
     | kubeconform -strict -summary -kubernetes-version "$kubernetes_version" -schema-location default
 
+echo "== dev without the ledger, whose objects, policies and secret keys then all go"
+rendered="$(helm template payment-gateway "$chart" --namespace payment-gateway-dev --values "$chart/values-dev.yaml" \
+    --set ledger.enabled=false --kube-version "$kubernetes_version")"
+kubeconform -strict -summary -kubernetes-version "$kubernetes_version" -schema-location default <<< "$rendered"
+if grep -nE "name: ledger|LEDGER_" <<< "$rendered"; then
+    echo "FAIL ledger.enabled=false still renders the ledger's objects (above)" >&2
+    exit 1
+fi
+
 # Fails unless helm template refuses the values given after EXPECTED with an error that contains EXPECTED.
 refuse() {
     local expected="$1" output
@@ -48,6 +57,12 @@ refuse "riskWhenUnavailable" --set gateway.riskWhenUnavailable=maybe
 refuse "/gateway/providers" --set gateway.providers=stripe
 refuse "database.url is needed" --set postgres.enabled=false
 refuse "redis.host is needed" --set redis.enabled=false
+refuse "kafka.bootstrapServers is needed" --set kafka.enabled=false
+refuse "kafka.replicationFactor must be 1" --set kafka.replicationFactor=3
+refuse "kafka.securityProtocol must be PLAINTEXT" --set kafka.securityProtocol=SSL
+refuse "/kafka/clusterId" --set kafka.clusterId=not-an-id
+refuse "ledger.database.url is needed" --set ledger.postgres.enabled=false
+refuse "ledger.podDisruptionBudget.minAvailable" --set ledger.podDisruptionBudget.enabled=true
 refuse "could never be drained" --set gateway.podDisruptionBudget.enabled=true
 refuse "minReplicas is above maxReplicas" --set gateway.autoscaling.enabled=true \
     --set gateway.autoscaling.minReplicas=5

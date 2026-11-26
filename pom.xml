@@ -13,7 +13,7 @@
 
     <groupId>dev.tkachuk</groupId>
     <artifactId>payment-gateway</artifactId>
-    <version>0.8.0</version>
+    <version>0.9.2</version>
     <packaging>pom</packaging>
     <name>payment-gateway</name>
     <description>Card payments for merchants through pluggable payment providers</description>
@@ -24,6 +24,7 @@
         <module>risk-service</module>
         <module>acquirer-sim</module>
         <module>merchant-sim</module>
+        <module>ledger-service</module>
     </modules>
 
     <properties>
@@ -41,6 +42,7 @@
         <!-- Testcontainers images; compose.yaml uses the same tags. -->
         <postgres.image>postgres:17-alpine</postgres.image>
         <redis.image>redis:8-alpine</redis.image>
+        <kafka.image>apache/kafka:4.2.2</kafka.image>
         <!-- Line coverage per module, unit and integration tests together. -->
         <coverage.minimum>0.80</coverage.minimum>
         <!-- Load Mockito as an agent at startup; newer JDKs warn about attaching it later. -->
@@ -88,6 +90,7 @@
                         <systemPropertyVariables>
                             <postgres.image>${postgres.image}</postgres.image>
                             <redis.image>${redis.image}</redis.image>
+                            <kafka.image>${kafka.image}</kafka.image>
                         </systemPropertyVariables>
                     </configuration>
                 </plugin>
@@ -98,6 +101,7 @@
                         <systemPropertyVariables>
                             <postgres.image>${postgres.image}</postgres.image>
                             <redis.image>${redis.image}</redis.image>
+                            <kafka.image>${kafka.image}</kafka.image>
                         </systemPropertyVariables>
                     </configuration>
                 </plugin>

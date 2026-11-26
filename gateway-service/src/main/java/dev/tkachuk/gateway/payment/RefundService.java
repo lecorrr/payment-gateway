@@ -2,6 +2,7 @@ package dev.tkachuk.gateway.payment;
 
 import dev.tkachuk.gateway.common.error.ErrorCode;
 import dev.tkachuk.gateway.common.error.GatewayException;
+import dev.tkachuk.gateway.event.EventOutbox;
 import dev.tkachuk.gateway.provider.FailureCodes;
 import dev.tkachuk.gateway.provider.ProviderConnector;
 import dev.tkachuk.gateway.provider.ProviderConnectors;
@@ -43,19 +44,22 @@ public class RefundService implements RefundNotifications {
     private final RequestFingerprints fingerprints;
     private final ProviderConnectors providers;
     private final WebhookOutbox webhooks;
+    private final EventOutbox events;
     private final TransactionTemplate transactions;
     private final PaymentMetrics metrics;
     private final PaymentProperties properties;
     private final Clock clock;
 
     RefundService(RefundRepository refunds, PaymentRepository payments, RequestFingerprints fingerprints,
-            ProviderConnectors providers, WebhookOutbox webhooks, PlatformTransactionManager transactionManager,
-            PaymentMetrics metrics, PaymentProperties properties, Clock clock) {
+            ProviderConnectors providers, WebhookOutbox webhooks, EventOutbox events,
+            PlatformTransactionManager transactionManager, PaymentMetrics metrics, PaymentProperties properties,
+            Clock clock) {
         this.refunds = refunds;
         this.payments = payments;
         this.fingerprints = fingerprints;
         this.providers = providers;
         this.webhooks = webhooks;
+        this.events = events;
         this.transactions = new TransactionTemplate(transactionManager);
         this.metrics = metrics;
         this.properties = properties;
@@ -222,8 +226,9 @@ public class RefundService implements RefundNotifications {
     }
 
     /**
-     * Writes the outcome, the payment's refunded amount for a SUCCEEDED refund, and the webhook event in one
-     * transaction. An empty change means another writer was first; then there is nothing else to write.
+     * Writes the outcome, the payment's refunded amount for a SUCCEEDED refund, and its events, for the merchant's
+     * webhook and for the payment-events topic, in one transaction. An empty change means another writer was first;
+     * then there is nothing else to write.
      */
     private Refund finish(Refund refund, RefundStatus status, @Nullable String providerReference,
             @Nullable String code) {
@@ -234,8 +239,7 @@ public class RefundService implements RefundNotifications {
                 if (done.status() == RefundStatus.SUCCEEDED) {
                     payments.addRefunded(done.paymentId(), done.amount(), now);
                 }
-                webhooks.add(done.merchantId(), done.paymentId(), RefundMapper.eventTypeOf(done.status()).getValue(),
-                        RefundMapper.toEvent(done));
+                addEvents(done);
             });
             return changed;
         });
@@ -247,6 +251,14 @@ public class RefundService implements RefundNotifications {
                 code == null ? "" : " (" + code + ")");
         metrics.refundFinished(finished.get());
         return finished.get();
+    }
+
+    // One change, one event id, on both channels.
+    private void addEvents(Refund refund) {
+        UUID eventId = UUID.randomUUID();
+        String type = RefundMapper.eventTypeOf(refund.status()).getValue();
+        webhooks.add(eventId, refund.merchantId(), refund.paymentId(), type, RefundMapper.toEvent(refund));
+        events.add(eventId, refund.paymentId(), type, refund.updatedAt(), RefundMapper.toEventData(refund));
     }
 
     private static RefundResult replay(Refund earlier, String fingerprint) {

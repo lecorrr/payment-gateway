@@ -1,7 +1,7 @@
-# The gateway, risk-service, two simulated providers, a simulated shop, PostgreSQL and Redis for a local demo, with
-# Prometheus, Grafana and Jaeger watching them. Ports are published on localhost only. Build the jars first
-# (./mvnw package) and make the .env file as the README shows: without it compose won't start. A host port that is
-# taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT, MONOBANK_SIM_PORT, MERCHANT_SIM_PORT,
+# The gateway, risk-service, the ledger, two simulated providers, a simulated shop, PostgreSQL, Redis and Kafka for a
+# local demo, with Prometheus, Grafana and Jaeger watching them. Ports are published on localhost only. Build the jars
+# first (./mvnw package) and make the .env file as the README shows: without it compose won't start. A host port that
+# is taken can be moved in .env: GATEWAY_PORT, ACQUIRER_SIM_PORT, MONOBANK_SIM_PORT, MERCHANT_SIM_PORT, LEDGER_PORT,
 # GATEWAY_DB_PORT, GRAFANA_PORT, PROMETHEUS_PORT, JAEGER_PORT.
 name: payment-gateway
 
@@ -32,6 +32,73 @@ services:
   # published: only the services here use it.
   redis:
     image: redis:8-alpine   # the same tag as redis.image in pom.xml
+
+  # The payment-events topic's broker: one node that is also its own controller (KRaft, no ZooKeeper). Any KAFKA_
+  # setting makes the image leave out its own defaults, so all of them are here, as in the Helm chart. No port is
+  # published: only the gateway and the ledger use it.
+  kafka:
+    image: apache/kafka:4.2.2   # the same tag as kafka.image in pom.xml
+    environment:
+      # Fixed, so a restart finds its own data in the volume.
+      CLUSTER_ID: 4AogIrPwRFuE_IXYvZfMDQ
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are made by the apps that own them, with their partitions: a misspelt name is an error.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data/kafka-logs
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx256m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # The listener's port: Kafka's own tools would each start a JVM.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9092"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  # The ledger's own database, which nothing else uses; no port is published.
+  ledger-postgres:
+    image: postgres:17-alpine   # the same tag as postgres.image in pom.xml
+    environment:
+      POSTGRES_DB: ledger
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+    volumes:
+      - ledger-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Books each payment and refund that succeeded, from the gateway's events on Kafka. Its internal API, on
+  # LEDGER_PORT, shows what it booked: /api/v1/payments/<id> and /api/v1/merchants/<id>/balances.
+  ledger-service:
+    build: ./ledger-service
+    image: ledger-service:local
+    depends_on:
+      kafka:
+        condition: service_healthy
+      ledger-postgres:
+        condition: service_healthy
+    environment:
+      <<: *traces
+      DB_URL: jdbc:postgresql://ledger-postgres:5432/ledger
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports:
+      - "127.0.0.1:${LEDGER_PORT:-8095}:8095"
 
   # Asked by the gateway, over gRPC, whether a payment may go ahead. Only the gateway calls it; Prometheus reads its
   # metrics on its HTTP port, 8094.
@@ -88,6 +155,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      # Started with it, though the gateway doesn't wait for Kafka: its events wait in the outbox meanwhile.
+      kafka:
+        condition: service_started
       risk-service:
         condition: service_started
       acquirer-sim:
@@ -100,6 +170,7 @@ services:
       <<: *traces
       DB_URL: jdbc:postgresql://postgres:5432/gateway
       REDIS_HOST: redis
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       RISK_SERVICE_TARGET: static://risk-service:9090
       # allow: a payment risk-service can't check goes ahead; decline: it fails.
       GATEWAY_RISK_WHEN_UNAVAILABLE: ${GATEWAY_RISK_WHEN_UNAVAILABLE:-allow}
@@ -156,3 +227,5 @@ services:
 
 volumes:
   gateway-db:
+  ledger-db:
+  kafka-data:
