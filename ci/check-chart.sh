@@ -20,6 +20,12 @@ for env in dev staging prod; do
             -schema-location default -schema-location "$crd_schemas"
 done
 
+echo "== dev with a commit's images from the registry, as the pipeline's e2e job deploys it"
+helm template payment-gateway "$chart" --namespace payment-gateway-dev --values "$chart/values-dev.yaml" \
+    --set image.registry=registry.gitlab.com/lecorrr/payment-gateway \
+    --set image.tag=0123456789abcdef0123456789abcdef01234567 --kube-version "$kubernetes_version" \
+    | kubeconform -strict -summary -kubernetes-version "$kubernetes_version" -schema-location default
+
 # Fails unless helm template refuses the values given after EXPECTED with an error that contains EXPECTED.
 refuse() {
     local expected="$1" output

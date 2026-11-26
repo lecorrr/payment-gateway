@@ -1,0 +1,9 @@
+# gitleaks, which the pipeline's secrets job runs over the whole history: its default rules everywhere but in the
+# tests, whose keys are made up for them or are the published examples of the schemes they check (the Standard
+# Webhooks test vector's secret looks like a real one). Real secrets live in .env, which is never committed.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Keys the tests make up, and published test vectors"
+paths = ['''(^|/)src/test/''']

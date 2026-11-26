@@ -4,6 +4,7 @@ import dev.tkachuk.acquirer.ChargeStore.StoredCharge;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -13,7 +14,6 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +35,8 @@ class ChargeService {
     static final String CHALLENGE_PATH = "/challenge/";
 
     private static final Logger log = LoggerFactory.getLogger(ChargeService.class);
+    // An approved charge's authorization code, as a bank's, should not be guessable from the ones before it.
+    private static final SecureRandom AUTH_CODES = new SecureRandom();
 
     private final ChargeStore store;
     private final SimProperties properties;
@@ -168,7 +170,7 @@ class ChargeService {
     }
 
     private static String newAuthCode() {
-        return "%06d".formatted(ThreadLocalRandom.current().nextInt(1_000_000));
+        return "%06d".formatted(AUTH_CODES.nextInt(1_000_000));
     }
 
     private void waitSlowDelay() {

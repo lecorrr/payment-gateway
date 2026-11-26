@@ -3,7 +3,7 @@ package dev.tkachuk.gateway.common.error;
 import java.util.Objects;
 
 /** A business rule refused the request. The code is for programs, the message for the merchant's developer. */
-public class GatewayException extends RuntimeException {
+public final class GatewayException extends RuntimeException {
 
     private final ErrorCode code;
 

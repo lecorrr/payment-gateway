@@ -128,8 +128,9 @@ class WebhookDispatcher implements SchedulingConfigurer {
     }
 
     private static String errorOf(DeliveryResult result) {
-        String error = result.error() == null ? "not delivered" : result.error();
-        return error.length() <= MAX_ERROR_LENGTH ? error : error.substring(0, MAX_ERROR_LENGTH);
+        String error = result.error();
+        String text = error == null ? "not delivered" : error;
+        return text.length() <= MAX_ERROR_LENGTH ? text : text.substring(0, MAX_ERROR_LENGTH);
     }
 
     private Instant now() {

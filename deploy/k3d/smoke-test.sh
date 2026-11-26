@@ -10,7 +10,10 @@
 # - with the autoscaler (staging), at least two gateways run, and a rollout of the gateway loses no payment;
 # - helm test.
 # It makes 20 to 200 test payments, the rollout most of them, and takes two to five minutes. Needs curl, kubectl
-# and python3.
+# and python3. The details go to a log in /tmp, or to SMOKE_TEST_LOG.
+#
+# The Ingress is this machine's port 8280. Where the cluster's load balancer listens somewhere else, INGRESS_ADDRESS
+# says where, as HOST:PORT; the pipeline's e2e job sets docker:8280, its Docker-in-Docker service.
 #
 #   deploy/k3d/smoke-test.sh dev|staging
 set -euo pipefail
@@ -31,8 +34,24 @@ port=8280
 gateway="http://gateway.$env.localhost:$port"
 shop="http://shop.$env.localhost:$port"
 api="$gateway/api/v1"
-log="$(mktemp "/tmp/smoke-test-$env.XXXXXX.log")"
+if [[ -n "${SMOKE_TEST_LOG:-}" ]]; then
+    log="$SMOKE_TEST_LOG"
+    mkdir -p "$(dirname "$log")"
+    : > "$log"
+else
+    log="$(mktemp "/tmp/smoke-test-$env-XXXXXX")"
+fi
 run_id="$(date +%s)"
+
+# Every request to the Ingress goes to INGRESS_ADDRESS instead, with the same URL and Host; the others, such as the
+# port-forwards' on 127.0.0.1, go where their URL says.
+connect_to=()
+if [[ -n "${INGRESS_ADDRESS:-}" ]]; then
+    connect_to=(--connect-to ":$port:$INGRESS_ADDRESS")
+fi
+curl() {
+    command curl "${connect_to[@]}" "$@"
+}
 seq=0
 summary=()
 
@@ -160,9 +179,12 @@ pod_get() {
     rm -f "$forward_log"
 }
 
+# The app's running pods, but not those already stopping: right after a rollout, the old pods still run for a
+# while, though they get no new requests.
 pods_of() {
     kc get pods -l "app.kubernetes.io/instance=$release,app.kubernetes.io/name=$1" \
-        --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'
+        --field-selector=status.phase=Running \
+        -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.name}} {{end}}{{end}}'
 }
 
 # The assessments a risk-service pod has counted.
@@ -181,6 +203,18 @@ gateway_reaches_its_stores() {
 
 merchant_sim_reaches_no_store() {
     ! can_connect merchant-sim postgres 5432 && ! can_connect merchant-sim redis 6379
+}
+
+# Whether any gateway pod is stopping: told to, but not gone yet.
+gateway_pods_stopping() {
+    [[ -n "$(kc get pods -l "app.kubernetes.io/instance=$release,app.kubernetes.io/name=gateway" \
+        -o jsonpath='{.items[*].metadata.deletionTimestamp}')" ]]
+}
+
+# Whether the rollout whose rollout status runs as PID is still on: rollout status still waiting, or old pods
+# still stopping.
+rollout_running() {
+    kill -0 "$1" 2> /dev/null || gateway_pods_stopping
 }
 
 ready_gateways_at_least() {
@@ -335,7 +369,10 @@ if kc get horizontalpodautoscaler gateway > /dev/null 2>&1; then
     rollout=$!
     sent=0
     lost=()
-    while kill -0 "$rollout" 2> /dev/null; do
+    rollout_started=$SECONDS
+    # Until the old pods are gone, not only until rollout status is done: that is when they are told to stop, and
+    # they still wait out their preStop and finish their requests.
+    while rollout_running "$rollout" && (( SECONDS - rollout_started < 420 )); do
         pay new
         sent=$(( sent + 1 ))
         [[ "$status" == 201 ]] || lost+=("$status")
@@ -343,8 +380,10 @@ if kc get horizontalpodautoscaler gateway > /dev/null 2>&1; then
     done
     if ! wait "$rollout"; then
         fail "the gateway's rollout did not finish in 5 minutes"
+    elif gateway_pods_stopping; then
+        fail "the gateway's old pods were still stopping 7 minutes after the rollout began"
     elif (( ${#lost[@]} == 0 && sent > 0 )); then
-        pass "a rollout of the gateway lost none of the $sent payments sent meanwhile"
+        pass "a rollout of the gateway lost none of the $sent payments of its $(( SECONDS - rollout_started )) s"
     else
         answers="$(printf '%s\n' "${lost[@]}" | sort -u | tr '\n' ' ')"
         fail "a rollout of the gateway lost ${#lost[@]} of $sent payments, answered HTTP ${answers% }"

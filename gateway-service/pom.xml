@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.7.0</version>
+        <version>0.8.0</version>
     </parent>
 
     <artifactId>gateway-service</artifactId>
@@ -166,6 +166,8 @@
                                 <useBeanValidation>true</useBeanValidation>
                                 <performBeanValidation>false</performBeanValidation>
                                 <openApiNullable>false</openApiNullable>
+                                <!-- JSpecify's @Nullable, which Spring Framework 7 uses, instead of its own deprecated one. -->
+                                <useJspecify>true</useJspecify>
                                 <documentationProvider>none</documentationProvider>
                                 <annotationLibrary>none</annotationLibrary>
                                 <hideGenerationTimestamp>true</hideGenerationTimestamp>

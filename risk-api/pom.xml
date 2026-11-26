@@ -7,12 +7,17 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.7.0</version>
+        <version>0.8.0</version>
     </parent>
 
     <artifactId>risk-api</artifactId>
     <name>risk-api</name>
     <description>The gRPC contract between gateway-service and risk-service, and the Java code generated from it</description>
+
+    <properties>
+        <!-- Its classes are all generated from risk.proto, so there is nothing of this repository's to analyse. -->
+        <spotbugs.skip>true</spotbugs.skip>
+    </properties>
 
     <dependencies>
         <dependency>

@@ -26,12 +26,15 @@ public final class Problems {
     /** The same fields as a map, for a filter that writes the response itself, before Spring MVC. */
     public static Map<String, Object> asMap(ProblemDetail problem) {
         Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("type", problem.getType().toString());
+        // RFC 9457: a problem with no type is of type about:blank. The ones of(...) makes always have their own.
+        URI type = problem.getType();
+        fields.put("type", type == null ? "about:blank" : type.toString());
         fields.put("title", problem.getTitle());
         fields.put("status", problem.getStatus());
         fields.put("detail", problem.getDetail());
-        if (problem.getProperties() != null) {
-            fields.putAll(problem.getProperties());
+        Map<String, Object> properties = problem.getProperties();
+        if (properties != null) {
+            fields.putAll(properties);
         }
         return fields;
     }

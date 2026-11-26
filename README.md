@@ -54,14 +54,19 @@ What it does:
 - **Kubernetes, per environment.** One Helm chart, with values for dev, staging and production. Staging runs two
   gateways and two risk-services, the gateways autoscaled, and a rollout loses no payment; production takes managed
   PostgreSQL and Redis and the real monobank. Each pod reaches only what it needs (network policies), meets the
-  restricted Pod Security Standard and is probed on a management port the Ingress doesn't route. The pipeline
-  checks the chart for every environment against Kubernetes' schemas.
+  restricted Pod Security Standard and is probed on a management port the Ingress doesn't route.
+- **Quality gates in the pipeline.** Every push is built and tested, with 80 % line coverage per module, SpotBugs
+  and FindSecBugs over the classes, the chart checked for every environment against Kubernetes' schemas, the whole
+  history searched for secrets (gitleaks) and the images scanned for known vulnerabilities (Trivy). On main, the
+  images then go to the project's registry, run on a k3d cluster inside the pipeline for the end-to-end check, and
+  only then get their version's tag: what is released is exactly what was checked.
 
 ## Stack
 
 Java 21, Spring Boot 4.1 (Web MVC, JdbcClient, Flyway, Actuator, RestClient, Data Redis, gRPC), Protocol Buffers,
 PostgreSQL 17, Redis 8, Resilience4j, Micrometer, OpenTelemetry, Prometheus, Grafana, Jaeger, OpenAPI Generator,
-springdoc, JUnit 6, WireMock, Testcontainers, JaCoCo, Docker, Kubernetes, Helm, k3d, kubeconform, GitLab CI.
+springdoc, JUnit 6, WireMock, Testcontainers, JaCoCo, SpotBugs, FindSecBugs, Docker, Kubernetes, Helm, k3d,
+kubeconform, gitleaks, Trivy, GitLab CI and its container registry.
 
 ## Run it
 
@@ -286,7 +291,15 @@ It needs Docker, [k3d](https://k3d.io/stable/#installation) 5.9, [kubectl](https
    payment may be lost.
 
 After a new build, `deploy.sh` again puts it out: images of other jars get a new tag, and the pods are replaced
-one by one. An environment goes, with its database and keys, like this:
+one by one. It can also put out the images the pipeline released, from the project's registry on GitLab, which
+anyone may pull from, with nothing built here:
+
+```bash
+IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.8.0 deploy/k3d/deploy.sh staging
+```
+
+`IMAGE_TAG` can also be a commit's full SHA: the images the pipeline pushed for that commit. An environment goes,
+with its database and keys, like this:
 
 ```bash
 helm --kube-context k3d-payment-gateway uninstall payment-gateway -n payment-gateway-dev
@@ -425,21 +438,32 @@ acquirer-sim/      the simulated card acquirer with its challenge pages, a separ
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
 observability/     Prometheus' scrape settings, Grafana's data source and the dashboard
 deploy/            the Helm chart with each environment's values (helm/), the local k3d cluster and its scripts (k3d/)
-ci/                scripts for the pipeline: the coverage report, the chart's check
-docs/              setting up GitLab, its runners and the GitHub mirror
+ci/                scripts for the pipeline: its tools, the coverage report, the chart's check, the images' build, scan
+                   and release, the e2e job's logs
+docs/              setting up GitLab, its runners, its registry and the GitHub mirror
 ```
 
 How the parts fit, and why: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## CI
 
-The repository lives on [GitLab](https://gitlab.com/lecorrr/payment-gateway), where every push runs the tests, the
-coverage gate, the chart's check for every environment and the image builds on GitLab's own runners
-([docs/gitlab-setup.md](docs/gitlab-setup.md)). The
-GitHub copy is a mirror of it. The coverage badge shows gateway-service's line coverage; the pipeline log has the
-other modules' too.
+The repository lives on [GitLab](https://gitlab.com/lecorrr/payment-gateway), whose own runners run the pipeline
+([docs/gitlab-setup.md](docs/gitlab-setup.md)); the GitHub copy is a mirror of it. Every job is a gate: one that
+fails stops the change there.
+
+| Job     | What it checks                                                                          | Runs on    |
+|---------|-----------------------------------------------------------------------------------------|------------|
+| verify  | the build; unit and integration tests; 80 % line coverage per module (JaCoCo); SpotBugs with FindSecBugs | every push |
+| chart   | `helm lint`, every environment's manifests against Kubernetes 1.35's schemas, values the chart must refuse | every push |
+| secrets | every commit, for keys, tokens and passwords (gitleaks)                                 | every push |
+| images  | the four images, for known HIGH or CRITICAL vulnerabilities that have a fix (Trivy); on main they are then pushed to the registry, tagged with the commit | every push |
+| e2e     | those images, deployed to a k3d cluster inside the job and checked by `smoke-test.sh`   | main       |
+| release | nothing more: it tags the commit's images with their version, such as `0.8.0`           | main       |
+
+The coverage badge shows gateway-service's line coverage; the pipeline log has the other modules' too. How the
+gates are set, and why: [ARCHITECTURE.md](ARCHITECTURE.md#pipeline).
 
 ## Next
 
-More quality gates in the pipeline, and the images published to the project's registry on GitLab, where
-`values-prod.yaml` takes them from.
+Events over Kafka: the outbox's payment and refund events published to a topic, with a consumer of their own. Then
+the AWS infrastructure `values-prod.yaml` expects, as Terraform, and a load test with measured latencies.

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.8.0 (2026-11-26)
+
+- Quality gates in the pipeline, each of which stops a change that fails it:
+  - `verify` also runs SpotBugs with FindSecBugs' security rules over every module's classes, and a finding of
+    medium priority or above fails the build. `spotbugs-exclude.xml` holds the four exceptions, each with its
+    reason; risk-api, all generated code, is left out.
+  - A `secrets` job searches every commit with gitleaks; `.gitleaks.toml` leaves out the tests' made-up keys.
+  - The `images` job scans each image with Trivy, its Ubuntu packages and the Java libraries in its jar: a known
+    HIGH or CRITICAL vulnerability that has a fix fails it. On main it then pushes the images to the project's
+    container registry, tagged with the commit's SHA.
+  - On main, an `e2e` job deploys exactly those images as dev to a one-node k3d cluster inside the job
+    (`deploy/k3d/cluster-ci.yaml`) and runs the smoke test against them; the cluster's state and every pod's log
+    are its artifacts. Then a `release` job tags the images with their version, such as `:0.8.0`, as a copy of the
+    same manifest, so the released image is the one the checks saw. A version is released once: a later commit of
+    the same version keeps only its commit tag.
+- The pipeline runs for a merge request instead of its branch when one is open, and a newer push cancels the jobs
+  of the pipeline before it that haven't finished, except a release. Every tool it downloads comes from
+  `ci/install-tools.sh`, in a fixed version and checked against its published checksum.
+- Docker-in-Docker runs with the MTU of GitLab's small runners, 1360, on its default network and on the ones made in
+  it, such as k3d's: with Docker's 1500, a container inside it sends packets too big to leave the runner.
+- Fixed what the static analysis found:
+  - merchant-sim writes the webhook id and the ids and types from a webhook into its log with line breaks replaced,
+    so a crafted request can't forge log lines of its own;
+  - acquirer-sim draws authorization codes from `SecureRandom`, as a bank's should not be guessable;
+  - where a field that may be missing was checked on one read and used on another (in the connectors, the monobank
+    webhook, the payment service, the request fingerprints and the webhook dispatcher), it is read once and that
+    value is checked and used. Nothing behaves differently, but SpotBugs can now see it is safe;
+  - the API key filter, which writes its 401 before Spring MVC, gives a problem without a type as `about:blank`
+    (RFC 9457) rather than failing on it; its own problems always have one;
+  - three classes whose constructors may throw are final: `GatewayException`, `ProviderConnectors` and
+    acquirer-sim's `MonobankKeys`.
+- The code generated from the OpenAPI contract uses JSpecify's `@Nullable`, as Spring Framework 7 does, instead of
+  Spring's deprecated one; SpotBugs reads it.
+- `deploy/k3d/deploy.sh` deploys a registry's images with `IMAGE_REGISTRY` and `IMAGE_TAG`, such as a released
+  version or a commit's images, without building anything. It loads images in k3d's direct mode, which fails if a
+  node refuses an image; for a Docker on another machine k3d would otherwise pick a mode that only logs that.
+- `deploy/k3d/smoke-test.sh`: the rollout check pays until the old gateways are gone, not only until
+  `kubectl rollout status` returns, since they still finish requests while they stop; the version check and the
+  risk-service check leave out pods that are already stopping, which a check right after a deploy saw;
+  `INGRESS_ADDRESS` sends the requests for the Ingress to another address, and `SMOKE_TEST_LOG` names the log. It
+  runs with BusyBox's tools, as in the pipeline's Alpine images, as well as with GNU's.
+- `deploy/k3d/create-cluster.sh` takes a k3d config file, and checks that port 8280 is free only when Docker runs on
+  this machine. `helm test` tries each app quietly and prints one line for it.
+- `ci/check-chart.sh` also renders dev with a commit's images from the registry, as the e2e job deploys it.
+
 ## 0.7.0 (2026-11-26)
 
 - A Helm chart, `deploy/helm/payment-gateway`, for one environment per namespace, with values for dev, staging and

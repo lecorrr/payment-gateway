@@ -173,15 +173,18 @@ class AcquirerSimConnector implements ProviderConnector {
     }
 
     private static ProviderRefundResult refundResultOf(@Nullable SimRefund refund, UUID reference) {
-        if (refund == null || refund.id() == null || refund.status() == null) {
+        String refundId = refund == null ? null : refund.id();
+        String status = refund == null ? null : refund.status();
+        if (refund == null || refundId == null || status == null) {
             log.warn("acquirer-sim answered for refund {} without a refund id or status", reference);
             return ProviderRefundResult.unknown();
         }
-        return switch (refund.status()) {
-            case "succeeded" -> ProviderRefundResult.succeeded(refund.id());
-            case "pending" -> ProviderRefundResult.pending(refund.id());
-            case "failed" -> ProviderRefundResult.failed(refund.id(),
-                    refund.failureCode() == null ? FailureCodes.REFUND_DECLINED : refund.failureCode());
+        String failureCode = refund.failureCode();
+        return switch (status) {
+            case "succeeded" -> ProviderRefundResult.succeeded(refundId);
+            case "pending" -> ProviderRefundResult.pending(refundId);
+            case "failed" -> ProviderRefundResult.failed(refundId,
+                    failureCode == null ? FailureCodes.REFUND_DECLINED : failureCode);
             default -> {
                 log.warn("acquirer-sim answered for refund {} with an unknown status", reference);
                 yield ProviderRefundResult.unknown();
@@ -190,14 +193,16 @@ class AcquirerSimConnector implements ProviderConnector {
     }
 
     private static ProviderResult resultOf(@Nullable SimCharge charge, UUID reference) {
-        if (charge == null || charge.id() == null || charge.status() == null) {
+        String chargeId = charge == null ? null : charge.id();
+        String status = charge == null ? null : charge.status();
+        if (charge == null || chargeId == null || status == null) {
             log.warn("acquirer-sim answered for payment {} without a charge id or status", reference);
             return ProviderResult.unknown();
         }
-        return switch (charge.status()) {
-            case "approved" -> ProviderResult.approved(charge.id());
-            case "declined" -> ProviderResult.declined(charge.id(), charge.declineCode());
-            case "requires_action" -> requiresAction(charge.id(), charge.actionUrl(), reference);
+        return switch (status) {
+            case "approved" -> ProviderResult.approved(chargeId);
+            case "declined" -> ProviderResult.declined(chargeId, charge.declineCode());
+            case "requires_action" -> requiresAction(chargeId, charge.actionUrl(), reference);
             default -> {
                 log.warn("acquirer-sim answered for payment {} with an unknown status", reference);
                 yield ProviderResult.unknown();

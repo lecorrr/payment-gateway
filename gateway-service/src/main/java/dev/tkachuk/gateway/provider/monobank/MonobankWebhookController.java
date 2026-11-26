@@ -95,11 +95,12 @@ class MonobankWebhookController {
 
     @Nullable
     private static UUID paymentIdOf(Invoice invoice) {
-        if (invoice.reference() == null) {
+        String reference = invoice.reference();
+        if (reference == null) {
             return null;
         }
         try {
-            return UUID.fromString(invoice.reference());
+            return UUID.fromString(reference);
         } catch (IllegalArgumentException e) {
             return null;
         }

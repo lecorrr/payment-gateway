@@ -1,0 +1,49 @@
+# The pipeline's cluster, for its e2e job: cluster.yaml's, but with one node, since GitLab's small runner has two
+# CPUs and 8 GB, and made in the job's Docker-in-Docker service, which the job reaches as docker. So the API server
+# and Traefik's port 8280 listen on that service's address, not on 127.0.0.1. The job runs
+# deploy/k3d/create-cluster.sh deploy/k3d/cluster-ci.yaml.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  # The scripts use the context k3d-payment-gateway, so the name is the local cluster's.
+  name: payment-gateway
+servers: 1
+agents: 0
+# The same Kubernetes as cluster.yaml's.
+image: rancher/k3s:v1.35.10-k3s1
+kubeAPI:
+  # The address in the kubeconfig and a name in the API server's certificate: the service as the job sees it.
+  host: docker
+  hostIP: 0.0.0.0
+  hostPort: "6550"
+ports:
+  # Also in ingress.port of values-dev.yaml.
+  - port: 0.0.0.0:8280:80
+    nodeFilters:
+      - loadbalancer
+registries:
+  # k3s pulls its own images (CoreDNS, Traefik and the rest) itself, not through Docker. Docker Hub limits anonymous
+  # pulls per IP address, and GitLab's runners share theirs, so they come through Google's copy of Docker Hub, as the
+  # job's Docker pulls do; Docker Hub itself still serves anything the copy lacks.
+  config: |
+    mirrors:
+      docker.io:
+        endpoint:
+          - https://mirror.gcr.io
+options:
+  k3s:
+    extraArgs:
+      # As in cluster.yaml: the kubelet keeps the images deploy.sh imports, rather than removing them to free disk
+      # space, which would break the next rollout.
+      - arg: --kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.available<1Gi,imagefs.available<1Gi
+        nodeFilters:
+          - server:*
+      - arg: --kubelet-arg=image-gc-high-threshold=99
+        nodeFilters:
+          - server:*
+      - arg: --kubelet-arg=image-gc-low-threshold=98
+        nodeFilters:
+          - server:*
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: false

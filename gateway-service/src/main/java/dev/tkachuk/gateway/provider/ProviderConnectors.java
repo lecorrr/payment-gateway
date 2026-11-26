@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
  * their own providers.
  */
 @Component
-public class ProviderConnectors {
+public final class ProviderConnectors {
 
     private static final Logger log = LoggerFactory.getLogger(ProviderConnectors.class);
 

@@ -3,6 +3,7 @@ package dev.tkachuk.gateway.payment;
 import dev.tkachuk.gateway.card.Card;
 import dev.tkachuk.gateway.card.CardNumber;
 import java.nio.charset.StandardCharsets;
+import java.net.URI;
 import java.security.GeneralSecurityException;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -42,8 +43,9 @@ class RequestFingerprints {
         append(input, card.holder());
         // Only when there is one, so a request without it keeps the fingerprint stored before returnUrl existed,
         // and its replay still matches.
-        if (payment.returnUrl() != null) {
-            append(input, payment.returnUrl().toString());
+        URI returnUrl = payment.returnUrl();
+        if (returnUrl != null) {
+            append(input, returnUrl.toString());
         }
         byte[] hash = newMac().doFinal(input.toString().getBytes(StandardCharsets.UTF_8));
         return HexFormat.of().formatHex(hash);

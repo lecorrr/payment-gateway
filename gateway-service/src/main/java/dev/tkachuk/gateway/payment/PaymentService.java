@@ -271,7 +271,8 @@ public class PaymentService implements ChargeNotifications {
     private Payment newPayment(UUID paymentId, UUID merchantId, String idempotencyKey, String fingerprint,
             NewPayment request, String provider, Instant now) {
         CardNumber number = request.card().number();
-        String returnUrl = request.returnUrl() == null ? null : request.returnUrl().toString();
+        URI requestedReturnUrl = request.returnUrl();
+        String returnUrl = requestedReturnUrl == null ? null : requestedReturnUrl.toString();
         return new Payment(paymentId, merchantId, idempotencyKey, fingerprint, request.orderId(),
                 request.amount(), request.currency(), request.description(), returnUrl, PaymentStatus.PROCESSING,
                 number.brand(), number.bin(), number.last4(), provider, null, null, 0, null,

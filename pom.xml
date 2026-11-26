@@ -13,7 +13,7 @@
 
     <groupId>dev.tkachuk</groupId>
     <artifactId>payment-gateway</artifactId>
-    <version>0.7.0</version>
+    <version>0.8.0</version>
     <packaging>pom</packaging>
     <name>payment-gateway</name>
     <description>Card payments for merchants through pluggable payment providers</description>
@@ -35,6 +35,9 @@
         <!-- Standalone jar: it shades its own Jetty and Jackson. -->
         <wiremock.version>3.13.2</wiremock.version>
         <jacoco.version>0.8.13</jacoco.version>
+        <!-- Static analysis in verify: SpotBugs, with FindSecBugs' security rules. -->
+        <spotbugs-maven-plugin.version>4.10.5.0</spotbugs-maven-plugin.version>
+        <findsecbugs.version>1.14.0</findsecbugs.version>
         <!-- Testcontainers images; compose.yaml uses the same tags. -->
         <postgres.image>postgres:17-alpine</postgres.image>
         <redis.image>redis:8-alpine</redis.image>
@@ -191,6 +194,34 @@
                                 </rule>
                             </rules>
                         </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- In verify, SpotBugs and FindSecBugs look through each module's classes for bug patterns and security
+                 mistakes, and anything of medium priority or above fails the build. spotbugs-exclude.xml lists what
+                 they leave out, and why; the findings are in target/spotbugsXml.xml. -->
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <version>${spotbugs-maven-plugin.version}</version>
+                <configuration>
+                    <effort>Max</effort>
+                    <threshold>Medium</threshold>
+                    <excludeFilterFile>${maven.multiModuleProjectDirectory}/spotbugs-exclude.xml</excludeFilterFile>
+                    <plugins>
+                        <plugin>
+                            <groupId>com.h3xstream.findsecbugs</groupId>
+                            <artifactId>findsecbugs-plugin</artifactId>
+                            <version>${findsecbugs.version}</version>
+                        </plugin>
+                    </plugins>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>static-analysis</id>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
                     </execution>
                 </executions>
             </plugin>

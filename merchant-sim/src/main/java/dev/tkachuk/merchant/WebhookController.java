@@ -57,15 +57,16 @@ class WebhookController {
             @RequestHeader(value = "webhook-timestamp", required = false) String timestamp,
             @RequestHeader(value = "webhook-signature", required = false) String signatures,
             @RequestBody byte[] body) {
+        String loggedId = forLog(messageId);
         try {
             verifier.verify(messageId, timestamp, signatures, body, clock.instant());
         } catch (InvalidWebhookException e) {
-            log.warn("Webhook {} refused: {}", messageId, e.getMessage());
+            log.warn("Webhook {} refused: {}", loggedId, forLog(e.getMessage()));
             return text(HttpStatus.BAD_REQUEST, e.getMessage());
         }
         int delivery = events.countDelivery(messageId);
         if (delivery <= properties.failFirst()) {
-            log.info("Webhook {}, delivery {}: answered 503 on purpose (merchant-sim.fail-first is {})", messageId,
+            log.info("Webhook {}, delivery {}: answered 503 on purpose (merchant-sim.fail-first is {})", loggedId,
                     delivery, properties.failFirst());
             return text(HttpStatus.SERVICE_UNAVAILABLE, "Failing on purpose; try again");
         }
@@ -73,7 +74,7 @@ class WebhookController {
         try {
             event = jsonMapper.readValue(body, GatewayEvent.class);
         } catch (JacksonException e) {
-            log.warn("Webhook {} refused: its body is no payment or refund event", messageId);
+            log.warn("Webhook {} refused: its body is no payment or refund event", loggedId);
             return text(HttpStatus.BAD_REQUEST, "The body is no payment or refund event");
         }
         if (event.data() == null || event.data().id() == null) {
@@ -86,12 +87,13 @@ class WebhookController {
         boolean taken = events.take(messageId, event.type(), paymentId, refundId, data.status(), event.timestamp(),
                 clock.instant());
         if (taken && refund) {
-            log.info("Webhook {} {}: refund {} of payment {} is {}", messageId, event.type(), refundId, paymentId,
-                    data.status());
+            log.info("Webhook {} {}: refund {} of payment {} is {}", loggedId, forLog(event.type()), forLog(refundId),
+                    forLog(paymentId), forLog(data.status()));
         } else if (taken) {
-            log.info("Webhook {} {}: payment {} is {}", messageId, event.type(), paymentId, data.status());
+            log.info("Webhook {} {}: payment {} is {}", loggedId, forLog(event.type()), forLog(paymentId),
+                    forLog(data.status()));
         } else {
-            log.info("Webhook {} came again, delivery {}: already taken, nothing to do", messageId, delivery);
+            log.info("Webhook {} came again, delivery {}: already taken, nothing to do", loggedId, delivery);
         }
         return ResponseEntity.noContent().build();
     }
@@ -99,6 +101,11 @@ class WebhookController {
     @GetMapping("/events")
     List<ReceivedEvents.Event> events() {
         return events.all();
+    }
+
+    // A value from the request as the log shows it: a line break in it would start a log line of its own.
+    private static String forLog(String value) {
+        return value == null ? "(none)" : value.replace("\r", "_").replace("\n", "_");
     }
 
     private static ResponseEntity<String> text(HttpStatus status, String message) {

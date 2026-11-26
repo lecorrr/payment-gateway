@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
  * one is made at every start; GET /api/merchant/pubkey hands out the public half.
  */
 @Component
-class MonobankKeys {
+final class MonobankKeys {
 
     private final KeyPair keyPair;
 

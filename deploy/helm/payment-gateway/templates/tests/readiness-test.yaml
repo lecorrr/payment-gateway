@@ -9,8 +9,8 @@
 {{- $urls = append $urls "http://merchant-sim:8081/actuator/health/readiness" }}
 {{- end }}
 # helm test: every app answers ready on its management port, asked from inside the namespace. It runs in the
-# gateway's image, which has curl, so the test needs no image of its own. Each URL gets about 30 s: the network
-# policies may take a few seconds to cover a pod as new as this one.
+# gateway's image, which has curl, so the test needs no image of its own. Each URL gets about 30 s, and only the
+# last try's error shows: the network policies take a second or two to cover a pod as new as this one.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -32,11 +32,17 @@ spec:
       command: ["/bin/sh", "-c"]
       args:
         - |
-          set -e
           for url in {{ join " " $urls }}; do
-            echo "$url"
-            curl --silent --show-error --fail --max-time 5 --retry 12 --retry-delay 2 --retry-all-errors "$url"
-            echo
+            tries=1
+            until answer="$(curl --silent --show-error --fail --max-time 5 "$url" 2>&1)"; do
+              if [ "$tries" -ge 15 ]; then
+                echo "$url: $answer"
+                exit 1
+              fi
+              tries=$((tries + 1))
+              sleep 2
+            done
+            echo "$url: $answer"
           done
       resources:
         requests:

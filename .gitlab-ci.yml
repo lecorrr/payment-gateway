@@ -1,15 +1,31 @@
 # Runs on GitLab's small Linux runners (docs/gitlab-setup.md), which allow the privileged containers that
-# Docker-in-Docker needs. Each job gets its own Docker daemon, for Testcontainers and docker build.
+# Docker-in-Docker needs. Each job that uses Docker gets its own daemon, for Testcontainers, docker build and k3d.
+#
+# Every pipeline: verify (the build, its tests, coverage and static analysis), chart, secrets and images (built and
+# scanned for vulnerabilities). On main also: the images pushed to the project's container registry, deployed to a
+# k3d cluster and checked end to end (e2e), then tagged with their version (release).
+
+workflow:
+  rules:
+    # A merge request's pipelines, or else the branch's: one pipeline for a push, not one of each.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
 
 stages:
   - test
   - package
+  - e2e
+  - release
 
 default:
   # Only GitLab's runners have this tag. A runner on your own machine would show that machine's internet address in
   # the details of every job it runs, and this project's jobs are public.
   tags:
     - saas-linux-small-amd64
+  # A newer push to the same branch cancels this pipeline's jobs that haven't finished; release opts out.
+  interruptible: true
 
 variables:
   # Maven and the Maven wrapper download into the project folder, so GitLab's cache can keep both.
@@ -21,7 +37,7 @@ variables:
   GET_SOURCES_ATTEMPTS: "3"
   RESTORE_CACHE_ATTEMPTS: "3"
   ARTIFACT_DOWNLOAD_ATTEMPTS: "3"
-  # Docker-in-Docker without TLS; Testcontainers finds the daemon through DOCKER_HOST.
+  # Docker-in-Docker without TLS; Testcontainers, docker, Trivy and k3d find the daemon through DOCKER_HOST.
   DOCKER_HOST: "tcp://docker:2375"
   DOCKER_TLS_CERTDIR: ""
   DOCKER_DRIVER: overlay2
@@ -30,13 +46,20 @@ variables:
   services:
     - name: docker:29-dind
       alias: docker
-      # Docker Hub limits anonymous pulls per IP address, and GitLab's runners share theirs with other projects.
-      # Google's copy of Docker Hub serves postgres, redis and the Java base image instead; Docker Hub itself still
-      # serves anything the copy lacks.
-      command: ["--tls=false", "--registry-mirror=https://mirror.gcr.io"]
+      command:
+        - "--tls=false"
+        # Docker Hub limits anonymous pulls per IP address, and GitLab's runners share theirs with other projects.
+        # Google's copy of Docker Hub serves postgres, redis and the Java base image instead; Docker Hub itself
+        # still serves anything the copy lacks.
+        - "--registry-mirror=https://mirror.gcr.io"
+        # The small runners' containers have an MTU of 1360, below Docker's 1500, so a container inside this daemon
+        # would send packets too big to leave the runner. Its default network and the networks made in it, such as
+        # k3d's, get 1360 too.
+        - "--mtu=1360"
+        - "--default-network-opt=bridge=com.docker.network.driver.mtu=1360"
 
-# Unit tests, integration tests against PostgreSQL and Redis in Testcontainers, and the coverage gate (80 % of lines
-# per module): any of them failing fails the pipeline.
+# Unit tests, integration tests against PostgreSQL and Redis in Testcontainers, the coverage gate (80 % of lines per
+# module), and SpotBugs with FindSecBugs over every module's classes: any of them failing fails the pipeline.
 verify:
   stage: test
   extends: .docker-in-docker
@@ -63,6 +86,7 @@ verify:
       - acquirer-sim/target/acquirer-sim.jar
       - merchant-sim/target/merchant-sim.jar
       - "*/target/site/jacoco/"
+      - "*/target/spotbugsXml.xml"
     reports:
       junit:
         - "*/target/surefire-reports/TEST-*.xml"
@@ -75,29 +99,33 @@ verify:
 # (ci/check-chart.sh). It needs neither the build nor Docker, so it runs beside verify.
 chart:
   stage: test
-  image: alpine:3.22
+  image: alpine:3.24
   needs: []
-  variables:
-    HELM_VERSION: "4.3.2"
-    KUBECONFORM_VERSION: "0.8.0"
-    # From kubeconform's CHECKSUMS of the release.
-    KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
   before_script:
     - apk add --no-cache bash curl
-    # Helm from its own site, checked against the checksum it publishes beside the download.
-    - curl -fsSLO "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
-    - curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz.sha256sum" -o helm.sha256sum
-    - echo "$(cut -d ' ' -f 1 helm.sha256sum)  helm-v${HELM_VERSION}-linux-amd64.tar.gz" | sha256sum -c -
-    - tar -xzf "helm-v${HELM_VERSION}-linux-amd64.tar.gz"
-    - install linux-amd64/helm /usr/local/bin/helm
-    - curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
-    - echo "${KUBECONFORM_SHA256}  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
-    - tar -xzf kubeconform-linux-amd64.tar.gz kubeconform
-    - install kubeconform /usr/local/bin/kubeconform
+    - bash ci/install-tools.sh helm kubeconform
   script:
     - bash ci/check-chart.sh
 
-# The images from the jars verify built; not pushed anywhere yet.
+# The whole history searched for secrets with gitleaks: keys, tokens and passwords committed by mistake, which a
+# later commit that deletes them doesn't take back. .gitleaks.toml says what it leaves out.
+secrets:
+  stage: test
+  image: alpine:3.24
+  needs: []
+  variables:
+    # Every commit, not the last 20 that GitLab fetches by default.
+    GIT_DEPTH: "0"
+  before_script:
+    - apk add --no-cache bash curl git
+    - bash ci/install-tools.sh gitleaks
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+  script:
+    - gitleaks git --config .gitleaks.toml --redact --no-banner --verbose .
+
+# The images from verify's jars, scanned by Trivy (ci/build-images.sh): a known HIGH or CRITICAL vulnerability with a
+# fix, in an image's system packages or its Java libraries, fails the job. On main the images then go to the
+# project's container registry, tagged with the commit.
 images:
   stage: package
   extends: .docker-in-docker
@@ -105,8 +133,75 @@ images:
   needs:
     - job: verify
       artifacts: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      variables:
+        PUSH_IMAGES: "true"
+    - when: on_success
+  before_script:
+    - apk add --no-cache bash curl
+    - bash ci/install-tools.sh trivy
   script:
-    - docker build --tag "gateway-service:$CI_COMMIT_SHORT_SHA" gateway-service
-    - docker build --tag "risk-service:$CI_COMMIT_SHORT_SHA" risk-service
-    - docker build --tag "acquirer-sim:$CI_COMMIT_SHORT_SHA" acquirer-sim
-    - docker build --tag "merchant-sim:$CI_COMMIT_SHORT_SHA" merchant-sim
+    - bash ci/build-images.sh
+  artifacts:
+    reports:
+      # APP_VERSION, for the release job.
+      dotenv: images.env
+
+# The commit's images from the registry, deployed as the dev environment on a k3d cluster in this job's
+# Docker-in-Docker (deploy/k3d/cluster-ci.yaml), then checked end to end by deploy/k3d/smoke-test.sh as on a laptop:
+# payments, a refund, webhooks, 3-D Secure, the NetworkPolicies and helm test. The cluster's state and the pods' logs
+# are the job's artifacts.
+e2e:
+  stage: e2e
+  extends: .docker-in-docker
+  image: docker:29-cli
+  needs:
+    - job: images
+      artifacts: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    IMAGE_REGISTRY: "$CI_REGISTRY_IMAGE"
+    IMAGE_TAG: "$CI_COMMIT_SHA"
+    # The cluster's load balancer listens in the Docker-in-Docker service, not on this job's 127.0.0.1.
+    INGRESS_ADDRESS: "docker:8280"
+    SMOKE_TEST_LOG: "$CI_PROJECT_DIR/e2e/smoke-test.log"
+  before_script:
+    - apk add --no-cache bash curl openssl python3
+    - bash ci/install-tools.sh k3d kubectl helm
+    - printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - deploy/k3d/create-cluster.sh deploy/k3d/cluster-ci.yaml
+    - deploy/k3d/deploy.sh dev
+    - deploy/k3d/smoke-test.sh dev
+  after_script:
+    - bash ci/collect-e2e-logs.sh
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - e2e/
+
+# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.8.0
+# (ci/release-images.sh). A version is released once: a later commit of the same version keeps only its commit tag.
+release:
+  stage: release
+  extends: .docker-in-docker
+  image: docker:29-cli
+  needs:
+    - job: verify
+      artifacts: false
+    - job: chart
+    - job: secrets
+    - job: images
+      artifacts: true
+    - job: e2e
+      artifacts: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  interruptible: false
+  before_script:
+    - apk add --no-cache bash
+  script:
+    - bash ci/release-images.sh

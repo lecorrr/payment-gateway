@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  What SpotBugs and FindSecBugs leave out in ./mvnw verify, each with why. Whatever else they find, from medium
+  priority up, fails the build.
+-->
+<FindBugsFilter xmlns="https://github.com/spotbugs/filter/3.0.0"
+                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="https://github.com/spotbugs/filter/3.0.0 https://raw.githubusercontent.com/spotbugs/spotbugs/3.1.0/spotbugs/etc/findbugsfilter.xsd">
+
+    <!-- Generated from payment-gateway.yaml by OpenAPI Generator, so not this repository's code to change. -->
+    <Match>
+        <Package name="~dev\.tkachuk\.gateway\.api(\..*)?"/>
+    </Match>
+
+    <!-- Text blocks end their lines with \n by definition, and the pages and messages made from them want just that. -->
+    <Match>
+        <Bug pattern="VA_FORMAT_STRING_USES_NEWLINE"/>
+    </Match>
+
+    <!-- Its constructor keeps an unmodifiable copy of the list, so handing the list out exposes nothing. -->
+    <Match>
+        <Class name="dev.tkachuk.gateway.provider.ProvidersProperties"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- The retries' jitter only spreads them in time; nothing about it needs to be unpredictable. -->
+    <Match>
+        <Class name="dev.tkachuk.gateway.webhook.WebhookDispatcher"/>
+        <Bug pattern="PREDICTABLE_RANDOM"/>
+    </Match>
+</FindBugsFilter>

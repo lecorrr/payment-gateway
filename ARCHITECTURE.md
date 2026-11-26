@@ -12,7 +12,8 @@ Secure. **risk-api** is no app: it holds the gRPC contract, risk.proto, and the 
 the gateway and risk-service both build on. Apart from that contract the apps share no code: merchant-sim checks
 webhook signatures with its own code, and a test in each app checks the same published signature example, so the two
 sides can't drift apart. In compose, Prometheus, Grafana and Jaeger watch all of them (see Observability). On
-Kubernetes, one Helm chart runs them, an environment per namespace (see Kubernetes).
+Kubernetes, one Helm chart runs them, an environment per namespace (see Kubernetes). The GitLab pipeline builds
+each image once, checks it, runs it on a cluster of its own and only then releases it (see Pipeline).
 
 ## Modules of gateway-service
 
@@ -348,11 +349,52 @@ own the volume's top. Redis keeps nothing on disk: the open circuits and recent 
 a restart.
 
 On k3d, `deploy.sh` builds the images from the jars and tags them with a checksum of the jars, so a new build means
-new pods and the same jars change nothing. `k3d image import` loads them, PostgreSQL's and Redis' with them, into
-every node, so nothing is pulled from a registry. The chart is checked twice: `ci/check-chart.sh` renders every
+new pods and the same jars change nothing; with `IMAGE_REGISTRY` and `IMAGE_TAG` it takes a registry's images
+instead, such as a released version's. `k3d image import` loads them, PostgreSQL's and Redis' with them, into every
+node, so the nodes pull nothing from a registry. The chart is checked twice: `ci/check-chart.sh` renders every
 environment and checks the result against Kubernetes 1.35's schemas, along with values the chart must refuse, and
 `deploy/k3d/smoke-test.sh` checks an environment that runs, from outside through the Ingress and from inside the
 pods.
+
+## Pipeline
+
+[.gitlab-ci.yml](.gitlab-ci.yml) runs on GitLab's small runners (two CPUs, 8 GB), each job in a container of its
+own, with a Docker-in-Docker service for the jobs that need Docker. Its jobs are gates, in the order a change goes
+through them:
+
+| Stage   | Job     | Fails when                                                                        | Runs on    |
+|---------|---------|-----------------------------------------------------------------------------------|------------|
+| test    | verify  | a test fails, a module's line coverage is under 80 %, or SpotBugs finds a bug pattern of medium priority or above | every push |
+| test    | chart   | the chart doesn't lint, renders something Kubernetes 1.35 would refuse, or takes a value it must refuse | every push |
+| test    | secrets | a commit, any commit, holds something that looks like a key, a token or a password | every push |
+| package | images  | an image has a known HIGH or CRITICAL vulnerability that has a fix                | every push |
+| e2e     | e2e     | the commit's images, deployed as dev to a k3d cluster, fail the smoke test         | main       |
+| release | release | (it releases: the commit's images get their version's tag)                         | main       |
+
+- **verify** runs `./mvnw verify`: the unit and integration tests, JaCoCo's coverage check, and SpotBugs with
+  FindSecBugs' security rules over every module's classes (risk-api's are all generated, so it is left out).
+  `spotbugs-exclude.xml` holds the four exceptions, each with its reason: the code generated from the OpenAPI
+  contract, format strings in text blocks (which end their lines with `\n`, not `%n`), a list SpotBugs can't see is
+  an unmodifiable copy, and the webhook retries' jitter, which needs no secure random. SpotBugs reads the libraries'
+  JSpecify annotations, so a value Spring marks as possibly null must be checked before it is used.
+- **secrets** runs gitleaks' default rules over the whole history, since a secret a later commit deleted is still
+  in git. `.gitleaks.toml` leaves out the tests, whose keys are made up for them or published test vectors.
+- **images** builds the four images from verify's jars, and Trivy scans each one's Ubuntu packages and the Java
+  libraries in its jar (`ci/build-images.sh`). Only what can be fixed fails the job (`--ignore-unfixed`): a finding
+  no newer version fixes yet would stop every pipeline and leave nothing to do. An exception would go into a
+  `.trivyignore.yaml`, with its reason and an expiry date; there are none. On main the images are then pushed to
+  the project's container registry under the commit's full SHA.
+- **e2e** makes a one-node k3d cluster inside the job's Docker-in-Docker (`deploy/k3d/cluster-ci.yaml`), deploys
+  exactly those images as dev, `deploy.sh` pulling them from the registry, and runs `deploy/k3d/smoke-test.sh dev`.
+  The cluster's API and its load balancer are in the Docker service, which the job reaches as `docker`, so the
+  smoke test sends its requests for `*.dev.localhost:8280` to `docker:8280` (`INGRESS_ADDRESS`). Whatever the
+  outcome, the job keeps the cluster's state and every pod's log as artifacts (`ci/collect-e2e-logs.sh`).
+- **release** gives the commit's images the version they were built as, from `pom.xml` through the jars'
+  build-info, such as `:0.8.0`, as a copy of the same manifest: the released image is byte for byte the one the
+  checks saw (`ci/release-images.sh`).
+
+Every tool a job downloads comes from `ci/install-tools.sh`, in a fixed version, checked against its published
+checksum before it runs.
 
 ## Decisions
 
@@ -419,6 +461,19 @@ pods.
 - **The gateway waits for its database.** Kubernetes starts the gateway and PostgreSQL side by side, so the
   migration tries to connect for about a minute (Flyway's `connect-retries`) rather than the gateway failing and
   restarting until the database is up.
+- **Build once, release by tag.** The images job builds each image once and pushes it under the commit's SHA; e2e
+  runs those very images, and release only adds the version's tag to the same manifest. Building again for the
+  release would release an image no check ever saw.
+- **A version is released once.** The release job never moves a version's tag: a later commit of the same version
+  keeps only its commit tag, so `0.8.0` names one build wherever it runs.
+- **Static analysis fails the build, with its exceptions written down.** A report nobody must read stops being
+  read; a short exclude file, a reason for each entry, keeps the findings few enough that a new one gets looked at.
+- **Image scans fail on what can be fixed.** HIGH and CRITICAL vulnerabilities with a fix stop the pipeline; one
+  that no version fixes yet would stop every pipeline with nothing to do but wait, so it counts once a fix exists.
+- **The end-to-end check runs on main, after the merge.** It is the slowest job, and a free account has 400 compute
+  minutes a month; a merge request gets every other gate, and a commit that fails the e2e check is never released.
+- **Tools in fixed versions, checked.** Each tool the pipeline downloads is a pinned version checked against its
+  published checksum, so a pipeline runs the same tools next month, and a download that isn't the release fails.
 - **One clock.** All timestamps come from the `Clock` bean, truncated to microseconds like PostgreSQL's, so a
   payment returned right away equals the one read back later.
 

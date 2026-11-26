@@ -20,3 +20,7 @@ logs/
 # Local secrets and overrides
 .env
 *.local.yml
+
+# Written by the pipeline's jobs (images.env, the e2e job's logs)
+images.env
+e2e/

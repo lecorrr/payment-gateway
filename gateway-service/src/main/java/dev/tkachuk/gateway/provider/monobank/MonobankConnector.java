@@ -216,12 +216,13 @@ class MonobankConnector implements ProviderConnector {
     }
 
     private static ProviderResult resultOf(@Nullable Invoice invoice, UUID reference) {
-        if (invoice == null || invoice.invoiceId() == null || invoice.status() == null) {
+        String invoiceId = invoice == null ? null : invoice.invoiceId();
+        String status = invoice == null ? null : invoice.status();
+        if (invoice == null || invoiceId == null || status == null) {
             log.warn("monobank answered for payment {} without an invoice id or status", reference);
             return ProviderResult.unknown();
         }
-        String invoiceId = invoice.invoiceId();
-        return switch (invoice.status()) {
+        return switch (status) {
             case "success" -> ProviderResult.approved(invoiceId);
             case "failure" -> declined(invoice, invoiceId, reference);
             case "expired" -> ProviderResult.declined(invoiceId, "authentication_expired");
@@ -230,7 +231,7 @@ class MonobankConnector implements ProviderConnector {
                 // hold can't follow a debit the gateway made, and reversed only follows a refund of a payment that
                 // succeeded already, which is never looked up: someone has to look at the invoice.
                 log.warn("monobank answered for payment {} with status {}, which the gateway does not act on",
-                        reference, invoice.status());
+                        reference, status);
                 yield ProviderResult.pending(invoiceId);
             }
         };

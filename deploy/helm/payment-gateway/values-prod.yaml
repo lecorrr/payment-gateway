@@ -1,9 +1,10 @@
 # An example of production. The pipeline renders it and checks the result against Kubernetes' schemas
 # (ci/check-chart.sh), but it is never installed from this repository. It shows what changes there: no simulators,
 # so payments go to monobank; PostgreSQL and Redis are managed services, Amazon RDS and ElastiCache here; the Secret
-# comes from the cluster's secret store, such as External Secrets from AWS Secrets Manager; the images come from a
-# registry, here the project's on GitLab, which the pipeline doesn't publish to yet; Traefik serves https with a
-# certificate from cert-manager; Prometheus and an OpenTelemetry Collector watch the apps.
+# comes from the cluster's secret store, such as External Secrets from AWS Secrets Manager; the images come from the
+# project's container registry on GitLab, where the pipeline releases them under their version, which is the chart's
+# appVersion; Traefik serves https with a certificate from cert-manager; Prometheus and an OpenTelemetry Collector
+# watch the apps.
 image:
   registry: registry.gitlab.com/lecorrr/payment-gateway
 
