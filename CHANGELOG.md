@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.0 (2026-11-27)
+
+- `load-test`: a Gatling load test in Java that sends payments through an environment's Ingress at fixed rates
+  rising in steps, after a warm-up 100, 200, 400, 800, 1600 and 3200 payments/s for two minutes each, until the knee:
+  the first rate whose p99 passes 500 ms or whose failures pass 1 %. The run stops as soon as the knee is certain and
+  prints each rate's failures and p50, p95 and p99. Every payment is a new Visa card, so risk-service's limit of ten
+  payments per card never declines one.
+- `deploy/k3d/load-test.sh staging` runs it against staging on k3d, with the demo merchant's key from the cluster,
+  and reports how many gateway pods were ready during the run, the most CPU each app used and how busy the machine
+  was. It runs on demand only; the pipeline's verify job compiles the load test and runs its unit tests.
+- README: the load test's results on one desktop with 24 CPU threads. No payment failed, p99 stayed under 200 ms up
+  to 800 payments/s, and the knee is at 1600 payments/s, with the machine's CPUs at most 63 % busy.
+
 ## 0.10.0 (2026-11-27)
 
 - `deploy/aws`: the AWS of prod in Terraform, never applied. It has an EKS cluster (Kubernetes 1.37) in a VPC across

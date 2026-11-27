@@ -76,6 +76,9 @@ verify:
   script:
     - ./mvnw $MAVEN_CLI_OPTS verify
     - bash ci/print-coverage.sh gateway-service risk-service ledger-service acquirer-sim merchant-sim
+    # The load test compiled and its own unit tests run; the load itself is only run on demand
+    # (deploy/k3d/load-test.sh), as this runner's two CPUs would be measured more than the gateway.
+    - ./mvnw $MAVEN_CLI_OPTS -f load-test/pom.xml test
   # The gateway's line coverage, shown on the pipeline and merge request pages.
   coverage: '/gateway-service line coverage: \d+\.\d+%/'
   artifacts:
@@ -198,7 +201,7 @@ e2e:
     paths:
       - e2e/
 
-# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.10.0
+# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.11.0
 # (ci/release-images.sh). A version is released once: a later commit of the same version keeps only its commit tag.
 release:
   stage: release

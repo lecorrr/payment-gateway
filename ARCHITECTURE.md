@@ -465,6 +465,38 @@ values-prod.yaml needs, and nothing more.
 - **Valkey rather than Redis OSS on ElastiCache**: the engine AWS recommends, with the same protocol as the Redis the
   apps use in compose and on k3d.
 
+## Load test
+
+[load-test](load-test) measures how the gateway's response times grow with the rate of payments, and where they stop
+keeping up. `deploy/k3d/load-test.sh` runs it against an environment on k3d, through its Ingress, as merchants reach
+the gateway.
+
+- **An open model: payments arrive at a fixed rate.** Each second Gatling starts the step's number of new payments,
+  whether or not the earlier ones have been answered (`constantUsersPerSec`). With a fixed number of users each
+  waiting for its answer instead, a slow gateway would slow the test's own requests down, and the time payments
+  spend queueing would never be measured.
+- **Rates in steps, each measured on its own.** A warm-up at 10 payments/s lets the JIT compile, the pools fill and
+  the CPU-scaled gateways settle before anything counts; then each rate, doubling from 100 to 3200 payments/s, runs
+  for two minutes. The simulation records every payment's result under its step (`StepStats`), as Gatling's own
+  summary covers the whole run, and prints each rate's row and the knee.
+- **The run stops at the knee, as soon as it is certain.** Before each payment, `stopLoadGeneratorIf` asks
+  `StepStats` whether a step before ended past the limits, or whether more than 1 % of this step's payments, all it
+  will make counted, have already failed or taken longer than the budget, which no later payment can undo. Steps past
+  the knee would only pile up payments the gateway can't take, and an overloaded machine measures nothing more. The
+  report is printed from one look at the stats, as answers already on their way are still recorded after the stop.
+- **The knee is a finding, not a failure.** The run fails only when the lowest rate already misses the p99 budget
+  or fails more than 1 % of its payments, since then the environment, not the load, is what is wrong.
+- **CPU beside the latencies.** Gatling, the five apps and their stores share one machine's CPUs, so where the knee
+  falls says as much about the machine as about the gateway. The script notes every 10 s each app's CPU, all its
+  pods together (`kubectl top`), and how busy the machine is (`/proc/stat`), so that the knee comes with the app
+  that was using the CPUs.
+- **A new card for every payment.** risk-service declines a card's eleventh payment within ten minutes, so each
+  payment gets the next number of a Visa range, with a valid Luhn digit (`TestCards`), and a new Idempotency-Key.
+- **A Maven project of its own, outside the services' build.** Under the services' parent, Spring Boot's, the
+  Netty and Jackson versions Gatling is built against would be replaced by Boot's, and Gatling has no place among
+  the services' dependencies. The pipeline compiles it and runs its unit tests; the load itself runs on demand,
+  since a runner with two CPUs would measure itself more than the gateway.
+
 ## Pipeline
 
 [.gitlab-ci.yml](.gitlab-ci.yml) runs on GitLab's small runners (two CPUs, 8 GB), each job in a container of its
@@ -486,7 +518,8 @@ through them:
   `spotbugs-exclude.xml` holds the four exceptions, each with its reason: the code generated from the OpenAPI
   contract, format strings in text blocks (which end their lines with `\n`, not `%n`), a list SpotBugs can't see is
   an unmodifiable copy, and the webhook retries' jitter, which needs no secure random. SpotBugs reads the libraries'
-  JSpecify annotations, so a value Spring marks as possibly null must be checked before it is used.
+  JSpecify annotations, so a value Spring marks as possibly null must be checked before it is used. The job then
+  compiles the load test and runs its unit tests (`./mvnw -f load-test/pom.xml test`).
 - **terraform** runs `ci/check-terraform.sh` over `deploy/aws` without an AWS account: `terraform fmt`, then `init`
   without a backend, `validate` and `terraform test` for prod and each module, then tflint with its AWS rules and
   Trivy's misconfiguration checks. The tests' providers are mocked, so they plan with made-up answers from AWS. The
@@ -506,7 +539,7 @@ through them:
   smoke test sends its requests for `*.dev.localhost:8280` to `docker:8280` (`INGRESS_ADDRESS`). Whatever the
   outcome, the job keeps the cluster's state and every pod's log as artifacts (`ci/collect-e2e-logs.sh`).
 - **release** gives the commit's images the version they were built as, from `pom.xml` through the jars'
-  build-info, such as `:0.10.0`, as a copy of the same manifest: the released image is byte for byte the one the
+  build-info, such as `:0.11.0`, as a copy of the same manifest: the released image is byte for byte the one the
   checks saw (`ci/release-images.sh`).
 
 Every tool a job downloads comes from `ci/install-tools.sh`, in a fixed version, checked against its published
@@ -581,7 +614,7 @@ checksum before it runs.
   runs those very images, and release only adds the version's tag to the same manifest. Building again for the
   release would release an image no check ever saw.
 - **A version is released once.** The release job never moves a version's tag: a later commit of the same version
-  keeps only its commit tag, so `0.10.0` names one build wherever it runs.
+  keeps only its commit tag, so `0.11.0` names one build wherever it runs.
 - **Static analysis fails the build, with its exceptions written down.** A report nobody must read stops being
   read; a short exclude file, a reason for each entry, keeps the findings few enough that a new one gets looked at.
 - **Image scans fail on what can be fixed.** HIGH and CRITICAL vulnerabilities with a fix stop the pipeline; one

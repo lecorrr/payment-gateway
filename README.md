@@ -345,7 +345,7 @@ Secret. It can also put out the images the pipeline released, from the project's
 anyone may pull from, with nothing built here:
 
 ```bash
-IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.10.0 deploy/k3d/deploy.sh staging
+IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.11.0 deploy/k3d/deploy.sh staging
 ```
 
 `IMAGE_TAG` can also be a commit's full SHA: the images the pipeline pushed for that commit. An environment goes,
@@ -371,6 +371,53 @@ of the VPC to itself, so the chart's NetworkPolicies keep the gateway away from 
 Neither is ever applied from this repository: the pipeline checks both without an AWS account. It runs
 `terraform validate` and `terraform test` with mocked providers, and a test there fails if values-prod.yaml's
 NetworkPolicies and the network disagree.
+
+## Load test
+
+[load-test](load-test) is a Gatling simulation in Java that sends payments through an environment's Ingress at
+fixed arrival rates rising in steps: a warm-up of 30 s at 10 payments/s, then 100, 200, 400, 800, 1600 and 3200
+payments/s for two minutes each. New payments keep coming at the rate whether or not the gateway has answered the
+earlier ones, as customers' do, so a gateway that falls behind shows it in its response times. Each payment is 150.00
+UAH on a Visa number no payment used before, which the simulators approve, and it succeeds when the gateway answers
+`201` with `SUCCEEDED` within 10 s. The run stops at the knee, the first rate whose p99 is over 500 ms or whose
+failures are over 1 %, as soon as that is certain: once more than 1 % of the step's payments have taken longer than
+500 ms, or failed. It then prints, for each rate, how many payments failed and the p50, p95 and p99 of those that
+succeeded.
+
+```bash
+deploy/k3d/load-test.sh staging
+```
+
+Every 10 s the script also notes how many gateway pods are ready, each app's CPU, as metrics-server sees it, and how
+busy the machine's CPUs are, and at the end prints the most of each. Gatling and the whole cluster share one machine,
+so the knee is as much the machine's as the gateway's, and the figures say which app was using the CPUs.
+`LOAD_STEPS`, `LOAD_STEP_SECONDS` and `LOAD_P99_BUDGET_MS` change the rates, how long each lasts and the budget, as
+in `LOAD_STEPS=50,100,150 deploy/k3d/load-test.sh staging`. Gatling's HTML report, with each rate's response times
+over the run, is in `load-test/target/gatling`. The run fails only when the lowest rate already misses the budget,
+as then the environment itself is unwell. The pipeline compiles the test and runs its unit tests, but not the load:
+GitLab's runners have two CPUs, and would measure themselves more than the gateway.
+
+### Measured
+
+One run against staging on k3d, on one desktop with Ubuntu 26.04, 24 CPU threads and 30 GB that also ran Gatling,
+with 0.11.0 on 2026-11-27. The gateway ran its four pods, the most staging's autoscaler allows, risk-service and the
+ledger two each, and the rest one.
+
+| Rate (payments/s) | Payments | Failed | p50 (ms) | p95 (ms) | p99 (ms) | Max (ms) |
+|---|---|---|---|---|---|---|
+| 100 | 12000 | 0 | 5 | 6 | 10 | 42 |
+| 200 | 24000 | 0 | 5 | 8 | 14 | 116 |
+| 400 | 48000 | 0 | 8 | 46 | 78 | 184 |
+| 800 | 96000 | 0 | 22 | 106 | 198 | 571 |
+| 1600 | 188037 | 0 | 29 | 312 | 503 | 1150 |
+
+None of the 368,037 payments failed. p99 stayed under 200 ms up to 800 payments/s, and the knee is at 1600
+payments/s, where p99 reached the budget: the run stopped there after nearly two minutes, once more than 1 % of the
+step's payments had taken longer than 500 ms. The machine's CPUs were at most 63 % busy, so the knee is not the
+machine running out of CPU. At their busiest the gateway's four pods used 5.2 cores, the monobank simulator 3.9,
+PostgreSQL 2.3 and risk-service 0.5, and every other app under 0.2; in production the simulator's share runs on the
+provider's machines, not the gateway's. Which queue grows at 1600 payments/s, such as each gateway's ten database
+connections or the simulator's single pod, is the next thing to measure.
 
 ## API
 
@@ -527,6 +574,7 @@ acquirer-sim/      the simulated card acquirer with its challenge pages, a separ
                    monobank-style one
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
 observability/     Prometheus' scrape settings, Grafana's data source and the dashboard
+load-test/         the Gatling load test: payments at rising rates through an environment's Ingress
 deploy/            the Helm chart with each environment's values (helm/), the local k3d cluster and its scripts (k3d/),
                    the AWS of prod in Terraform (aws/)
 ci/                scripts for the pipeline: its tools, the coverage report, the chart's and the Terraform's checks,
@@ -545,17 +593,18 @@ fails stops the change there.
 
 | Job     | What it checks                                                                          | Runs on    |
 |---------|-----------------------------------------------------------------------------------------|------------|
-| verify  | the build; unit and integration tests; 80 % line coverage per module (JaCoCo); SpotBugs with FindSecBugs | every push |
+| verify  | the build; unit and integration tests; 80 % line coverage per module (JaCoCo); SpotBugs with FindSecBugs; the load test's compile and unit tests | every push |
 | chart   | `helm lint`, every environment's manifests against Kubernetes' schemas (1.35 on k3d, 1.37 for prod's EKS), values the chart must refuse | every push |
 | terraform | `deploy/aws`, never applied: formatting, `terraform validate`, `terraform test` with mocked providers, tflint's AWS rules, Trivy's HIGH or CRITICAL misconfigurations | every push |
 | secrets | every commit, for keys, tokens and passwords (gitleaks)                                 | every push |
 | images  | the five images, for known HIGH or CRITICAL vulnerabilities that have a fix (Trivy); on main they are then pushed to the registry, tagged with the commit | every push |
 | e2e     | those images, deployed to a k3d cluster inside the job and checked by `smoke-test.sh`   | main       |
-| release | nothing more: it tags the commit's images with their version, such as `0.10.0`          | main       |
+| release | nothing more: it tags the commit's images with their version, such as `0.11.0`          | main       |
 
 The coverage badge shows gateway-service's line coverage; the pipeline log has the other modules' too. How the
 gates are set, and why: [ARCHITECTURE.md](ARCHITECTURE.md#pipeline).
 
 ## Next
 
-A load test with measured latencies.
+Bug patterns and nulls caught at compile time (Error Prone, NullAway), mutation testing of the payment and ledger
+code (PIT), and formatting and dependency rules enforced by the build (Spotless, Maven Enforcer).
