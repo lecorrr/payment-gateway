@@ -11,6 +11,11 @@ spring:
   grpc:
     server:
       port: ${RISK_SERVICE_PORT:9090}
+    client:
+      channel:
+        # risk-service itself, for the made-up payment it assesses before it reports ready (WarmUp).
+        self:
+          target: static://localhost:${spring.grpc.server.port}
 
 # HTTP is for the actuator only: health, and metrics for Prometheus. The payments come over gRPC.
 server:

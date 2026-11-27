@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.9.2</version>
+        <version>0.9.3</version>
     </parent>
 
     <artifactId>risk-service</artifactId>
@@ -23,6 +23,11 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-grpc-server</artifactId>
+        </dependency>
+        <!-- A client of that server, for the made-up payment it assesses before it reports ready. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-grpc-client</artifactId>
         </dependency>
         <!-- Tomcat on a second port, for the actuator only: health, and metrics for Prometheus. Without
              grpc-servlet-jakarta on the classpath gRPC stays on Netty. -->

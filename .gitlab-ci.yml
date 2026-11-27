@@ -185,7 +185,7 @@ e2e:
     paths:
       - e2e/
 
-# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.9.2
+# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.9.3
 # (ci/release-images.sh). A version is released once: a later commit of the same version keeps only its commit tag.
 release:
   stage: release

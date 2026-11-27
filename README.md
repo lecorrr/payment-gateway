@@ -308,8 +308,8 @@ It needs Docker, [k3d](https://k3d.io/stable/#installation) 5.9, [kubectl](https
    ```
 
 4. Check it end to end. Through the Ingress, as a merchant and a customer's browser would, it pays, replays,
-   refunds and goes through 3-D Secure; it checks that the ledger booked the payment and its refund, and from inside
-   the pods it checks the network policies:
+   refunds and goes through 3-D Secure; it checks that risk-service answered for every payment in time and that the
+   ledger booked the payment and its refund, and from inside the pods it checks the network policies:
 
    ```bash
    deploy/k3d/smoke-test.sh dev
@@ -345,7 +345,7 @@ Secret. It can also put out the images the pipeline released, from the project's
 anyone may pull from, with nothing built here:
 
 ```bash
-IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.9.2 deploy/k3d/deploy.sh staging
+IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.9.3 deploy/k3d/deploy.sh staging
 ```
 
 `IMAGE_TAG` can also be a commit's full SHA: the images the pipeline pushed for that commit. An environment goes,
@@ -539,7 +539,7 @@ fails stops the change there.
 | secrets | every commit, for keys, tokens and passwords (gitleaks)                                 | every push |
 | images  | the five images, for known HIGH or CRITICAL vulnerabilities that have a fix (Trivy); on main they are then pushed to the registry, tagged with the commit | every push |
 | e2e     | those images, deployed to a k3d cluster inside the job and checked by `smoke-test.sh`   | main       |
-| release | nothing more: it tags the commit's images with their version, such as `0.9.2`           | main       |
+| release | nothing more: it tags the commit's images with their version, such as `0.9.3`           | main       |
 
 The coverage badge shows gateway-service's line coverage; the pipeline log has the other modules' too. How the
 gates are set, and why: [ARCHITECTURE.md](ARCHITECTURE.md#pipeline).

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.3 (2026-11-27)
+
+- A new risk-service pod's first assessment took about 0.5 s while every pod of staging started at once, past the
+  gateway's 300 ms deadline, so that payment went ahead unchecked: staging's smoke test charged a card from the
+  blocked range. risk-service now assesses one made-up payment through its own gRPC server before it reports ready
+  (`WarmUp`), and the gateways call no pod before it is ready.
+- The smoke test checks that risk-service answered for every payment in time, from the gateways' count of payments
+  that went ahead unchecked, and names the gateway's reason when one did.
+
 ## 0.9.2 (2026-11-26)
 
 The first full builds of 0.9.0 and 0.9.1 failed, so neither was released: this is the first release with what 0.9.0

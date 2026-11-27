@@ -102,6 +102,16 @@ class RiskServiceIT {
         assertThat(expiresInMillis).isBetween(1L, TimeUnit.MINUTES.toMillis(10));
     }
 
+    // Before it was ready, risk-service assessed a made-up payment over gRPC, through the rules to Redis.
+    @Test
+    void shouldHaveWarmedUpThroughRedisAtStartup() {
+        Double counted = redis.opsForZSet().score(
+                RedisVelocityCounter.KEY_PREFIX + WarmUp.MADE_UP_PAYMENT.getCardToken(),
+                WarmUp.MADE_UP_PAYMENT.getAttemptId());
+
+        assertThat(counted).isNotNull();
+    }
+
     @Test
     void shouldRefuseRequestWithoutCardToken() {
         AssessRequest request = request("order-1", "411111", 15000).toBuilder().clearCardToken().build();

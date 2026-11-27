@@ -177,6 +177,13 @@ least five came and half of them were errors or late, payments stop waiting for 
 s), and then two trial calls decide whether it is back. The channel is plaintext inside the compose network;
 `spring.grpc.client.channel.risk.ssl` turns TLS on.
 
+A new risk-service is not ready until it has assessed one made-up payment through its own gRPC server (`WarmUp`,
+over the channel `self` to localhost). Its first assessment loads what the gRPC path, the rules and Redis's
+connection need: while every pod of staging started at once it took about 0.5 s, past the gateway's deadline, and
+that payment went ahead unchecked. Spring Boot reports ready only once the warm-up has run, and the gateways call no
+pod before it is ready. The warm-up shows as an allowed assessment of payment `warm-up`, counted in Redis for a card
+`warm-up` of its own; one that fails is logged, and risk-service starts anyway.
+
 ## 3-D Secure
 
 1. The merchant creates the payment; the gateway charges the card with `/3ds/return/{id}` as the return URL.
@@ -465,7 +472,7 @@ through them:
   smoke test sends its requests for `*.dev.localhost:8280` to `docker:8280` (`INGRESS_ADDRESS`). Whatever the
   outcome, the job keeps the cluster's state and every pod's log as artifacts (`ci/collect-e2e-logs.sh`).
 - **release** gives the commit's images the version they were built as, from `pom.xml` through the jars'
-  build-info, such as `:0.9.2`, as a copy of the same manifest: the released image is byte for byte the one the
+  build-info, such as `:0.9.3`, as a copy of the same manifest: the released image is byte for byte the one the
   checks saw (`ci/release-images.sh`).
 
 Every tool a job downloads comes from `ci/install-tools.sh`, in a fixed version, checked against its published
@@ -540,7 +547,7 @@ checksum before it runs.
   runs those very images, and release only adds the version's tag to the same manifest. Building again for the
   release would release an image no check ever saw.
 - **A version is released once.** The release job never moves a version's tag: a later commit of the same version
-  keeps only its commit tag, so `0.9.2` names one build wherever it runs.
+  keeps only its commit tag, so `0.9.3` names one build wherever it runs.
 - **Static analysis fails the build, with its exceptions written down.** A report nobody must read stops being
   read; a short exclude file, a reason for each entry, keeps the findings few enough that a new one gets looked at.
 - **Image scans fail on what can be fixed.** HIGH and CRITICAL vulnerabilities with a fix stop the pipeline; one

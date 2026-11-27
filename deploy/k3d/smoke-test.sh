@@ -5,6 +5,7 @@
 # - through the Ingress at http://*.ENV.localhost:8280: a payment and its replay, a refund settled by monobank-sim's
 #   webhook, both webhooks at the demo shop, a 3-D Secure payment from the challenge page back to the shop's page,
 #   and a payment risk-service declines;
+# - risk-service answered for every one of those payments in time: none went ahead unchecked;
 # - the ledger booked the payment and its refund from their events on Kafka;
 # - the NetworkPolicies: the gateway reaches PostgreSQL, Redis and Kafka, the ledger Kafka and its own database,
 #   which the gateway can't reach, and merchant-sim reaches none of them;
@@ -44,6 +45,7 @@ else
     log="$(mktemp "/tmp/smoke-test-$env-XXXXXX")"
 fi
 run_id="$(date +%s)"
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Every request to the Ingress goes to INGRESS_ADDRESS instead, with the same URL and Host; the others, such as the
 # port-forwards' on 127.0.0.1, go where their URL says.
@@ -194,6 +196,24 @@ assessments_of() {
     pod_get "pod/$1" 8094 /actuator/prometheus | awk '/^risk_assessments_total\{/ { sum += $NF } END { print sum + 0 }'
 }
 
+# The payments a gateway pod let go ahead without a risk check, as risk-service gave no answer in time or its
+# circuit was open: the pod's gateway_risk_checks_total of answer "unavailable". Nothing when that count can't be
+# read, as the gateway has it from the start, at 0.
+unchecked_of() {
+    pod_get "pod/$1" 8081 /actuator/prometheus \
+        | awk '/^gateway_risk_checks_total\{/ && /answer="unavailable"/ { sum += $NF; found = 1 }
+               END { if (found) print sum + 0 }'
+}
+
+# Why payment ID, or by default the first payment since the run began, went ahead without a risk check, in the
+# words of the gateway that let it; nothing when no gateway now running logged it.
+unchecked_reason() {
+    local id="${1:-[0-9a-f-]*}"
+    kc logs -l "app.kubernetes.io/instance=$release,app.kubernetes.io/name=gateway" --tail=-1 \
+        --max-log-requests=10 --since-time="$started_at" 2>> "$log" \
+        | grep -m1 -o "Payment $id goes ahead without a risk check: .*" || true
+}
+
 # Whether the app's TCP connection to HOST:PORT opens within 3 s, from inside its pod.
 can_connect() {
     kc exec "deploy/$1" -- timeout 3 bash -c "exec 3<>/dev/tcp/$2/$3"
@@ -281,6 +301,12 @@ else
     fail "not every pod runs $version: ${stale[*]}"
 fi
 
+# What each gateway pod has let go ahead without a risk check before this run, from earlier ones.
+declare -A unchecked_before
+for pod in $(pods_of gateway); do
+    unchecked_before[$pod]="$(unchecked_of "$pod")"
+done
+
 # A payment, its replay, a refund and their webhooks, through the Ingress.
 pay new
 paid_id="$(json_value id <<< "$body")"
@@ -347,7 +373,12 @@ if [[ "$status" == 201 && "$(json_value status <<< "$body")" == DECLINED \
     && "$(json_value declineCode <<< "$body")" == risk_declined ]]; then
     pass "a payment from the blocked card range is declined by risk-service"
 else
-    fail "a payment from the blocked card range: HTTP $status, $body"
+    blocked_id="$(json_value id <<< "$body")"
+    reason=""
+    if [[ -n "$blocked_id" ]]; then
+        reason="$(unchecked_reason "$blocked_id")"
+    fi
+    fail "a payment from the blocked card range: HTTP $status, $body${reason:+; the gateway logged: $reason}"
 fi
 
 # The NetworkPolicies, from inside the pods.
@@ -383,6 +414,27 @@ if (( ${#risk_pods[@]} > 1 )); then
     else
         fail "the gateways' calls missed ${idle[*]} for 2 minutes"
     fi
+fi
+
+# risk-service answered for every payment so far in time, none going ahead unchecked; before the rollout below
+# replaces the gateway pods and their counts.
+unchecked=0
+unread=()
+for pod in $(pods_of gateway); do
+    count="$(unchecked_of "$pod")"
+    if [[ -z "$count" ]]; then
+        unread+=("$pod")
+    elif (( count > ${unchecked_before[$pod]:-0} )); then
+        unchecked=$(( unchecked + count - ${unchecked_before[$pod]:-0} ))
+    fi
+done
+if (( ${#unread[@]} > 0 )); then
+    fail "could not read how many payments went ahead without a risk check on ${unread[*]}"
+elif (( unchecked == 0 )); then
+    pass "risk-service answered for every payment in time"
+else
+    reason="$(unchecked_reason)"
+    fail "$unchecked of the payments went ahead without a risk check${reason:+; the first: $reason}"
 fi
 
 # With the autoscaler: two gateways, and a rollout that loses no payment.
