@@ -4,8 +4,8 @@
   "description": "Every value the chart reads; a misspelt or unknown key fails helm install, upgrade, lint and template.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["image", "existingSecret", "ingress", "gateway", "riskService", "ledger", "acquirerSim", "monobankSim",
-    "merchantSim", "postgres", "database", "redis", "kafka", "tracing", "serviceMonitor", "networkPolicy"],
+  "required": ["image", "existingSecret", "externalSecret", "ingress", "gateway", "riskService", "ledger", "acquirerSim",
+    "monobankSim", "merchantSim", "postgres", "database", "redis", "kafka", "tracing", "serviceMonitor", "networkPolicy"],
   "definitions": {
     "host": {
       "type": "string",
@@ -98,6 +98,23 @@
       }
     },
     "existingSecret": {"type": "string", "minLength": 1},
+    "externalSecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "storeName", "refreshInterval", "databaseSecret", "ledgerDatabaseSecret", "appSecret"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "storeName": {"type": "string"},
+        "refreshInterval": {
+          "description": "A Go duration, which External Secrets reads: a number and s, m or h.",
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$"
+        },
+        "databaseSecret": {"type": "string"},
+        "ledgerDatabaseSecret": {"type": "string"},
+        "appSecret": {"type": "string"}
+      }
+    },
     "ingress": {
       "type": "object",
       "additionalProperties": false,

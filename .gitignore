@@ -24,3 +24,10 @@ logs/
 # Written by the pipeline's jobs (images.env, the e2e job's logs)
 images.env
 e2e/
+
+# Written by terraform init and terraform test (ci/check-terraform.sh). deploy/aws/prod/versions.tf pins the
+# providers, so no lock file is kept; there is never a state, as nothing is applied.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*

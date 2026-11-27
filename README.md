@@ -345,7 +345,7 @@ Secret. It can also put out the images the pipeline released, from the project's
 anyone may pull from, with nothing built here:
 
 ```bash
-IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.9.3 deploy/k3d/deploy.sh staging
+IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.10.0 deploy/k3d/deploy.sh staging
 ```
 
 `IMAGE_TAG` can also be a commit's full SHA: the images the pipeline pushed for that commit. An environment goes,
@@ -361,6 +361,16 @@ kubectl --context k3d-payment-gateway delete namespace payment-gateway-dev
 
 and the cluster with `k3d cluster delete payment-gateway`. How the chart is built, and why:
 [ARCHITECTURE.md](ARCHITECTURE.md#kubernetes).
+
+## Prod on AWS
+
+`values-prod.yaml` describes prod on AWS, and [deploy/aws](deploy/aws/README.md) describes, in Terraform, the AWS it
+runs on: an EKS cluster in a VPC across three zones, the gateway's and the ledger's PostgreSQL on RDS, Valkey on
+ElastiCache, Kafka on MSK, and the secrets that External Secrets puts into the app's Secret. Each store has a range
+of the VPC to itself, so the chart's NetworkPolicies keep the gateway away from the ledger's database, as on k3d.
+Neither is ever applied from this repository: the pipeline checks both without an AWS account. It runs
+`terraform validate` and `terraform test` with mocked providers, and a test there fails if values-prod.yaml's
+NetworkPolicies and the network disagree.
 
 ## API
 
@@ -517,9 +527,10 @@ acquirer-sim/      the simulated card acquirer with its challenge pages, a separ
                    monobank-style one
 merchant-sim/      the simulated shop: takes and checks webhooks, shows the page the customer comes back to
 observability/     Prometheus' scrape settings, Grafana's data source and the dashboard
-deploy/            the Helm chart with each environment's values (helm/), the local k3d cluster and its scripts (k3d/)
-ci/                scripts for the pipeline: its tools, the coverage report, the chart's check, the images' build, scan
-                   and release, the e2e job's logs
+deploy/            the Helm chart with each environment's values (helm/), the local k3d cluster and its scripts (k3d/),
+                   the AWS of prod in Terraform (aws/)
+ci/                scripts for the pipeline: its tools, the coverage report, the chart's and the Terraform's checks,
+                   the images' build, scan and release, the e2e job's logs
 docs/              the payment-events topic's contract (AsyncAPI); setting up GitLab, its runners, its registry and
                    the GitHub mirror
 ```
@@ -535,16 +546,16 @@ fails stops the change there.
 | Job     | What it checks                                                                          | Runs on    |
 |---------|-----------------------------------------------------------------------------------------|------------|
 | verify  | the build; unit and integration tests; 80 % line coverage per module (JaCoCo); SpotBugs with FindSecBugs | every push |
-| chart   | `helm lint`, every environment's manifests against Kubernetes 1.35's schemas, values the chart must refuse | every push |
+| chart   | `helm lint`, every environment's manifests against Kubernetes' schemas (1.35 on k3d, 1.37 for prod's EKS), values the chart must refuse | every push |
+| terraform | `deploy/aws`, never applied: formatting, `terraform validate`, `terraform test` with mocked providers, tflint's AWS rules, Trivy's HIGH or CRITICAL misconfigurations | every push |
 | secrets | every commit, for keys, tokens and passwords (gitleaks)                                 | every push |
 | images  | the five images, for known HIGH or CRITICAL vulnerabilities that have a fix (Trivy); on main they are then pushed to the registry, tagged with the commit | every push |
 | e2e     | those images, deployed to a k3d cluster inside the job and checked by `smoke-test.sh`   | main       |
-| release | nothing more: it tags the commit's images with their version, such as `0.9.3`           | main       |
+| release | nothing more: it tags the commit's images with their version, such as `0.10.0`          | main       |
 
 The coverage badge shows gateway-service's line coverage; the pipeline log has the other modules' too. How the
 gates are set, and why: [ARCHITECTURE.md](ARCHITECTURE.md#pipeline).
 
 ## Next
 
-The AWS infrastructure `values-prod.yaml` expects, as Terraform: the cluster, the databases, Redis and MSK. Then a
-load test with measured latencies.
+A load test with measured latencies.

@@ -389,8 +389,9 @@ Every pod of an app:
   Spring finishes the requests it has, for up to 30 s. The gateway, risk-service and the ledger roll out with
   `maxUnavailable: 0`, so a rollout never has fewer ready pods than before it.
 
-The Secret is made outside the chart (`deploy.sh` makes one of random keys on k3d; in production the cluster's
-secret store would), and the chart only reads it, so no secret is in a values file or in Helm's release history.
+The Secret is made outside the chart (`deploy.sh` makes one of random keys on k3d; in prod External Secrets writes
+it from AWS Secrets Manager, through the chart's ExternalSecret), and the chart only reads it, so no secret is in a
+values file or in Helm's release history.
 It stays after `helm uninstall`, as the databases' volumes do, whose passwords it holds. `deploy.sh` adds a key a
 newer version needs to a Secret an older one made, as `LEDGER_DB_PASSWORD` for 0.9.0.
 
@@ -407,9 +408,10 @@ the apps need:
 | `helm test`, Prometheus | every app's management port                                                          |
 
 Nothing reaches the ledger's API port, and Kafka reaches nothing: its controller is in the same process. Outside
-the namespace, production adds the gateway's egress to monobank's API and the merchants' webhook endpoints (443), to
-the managed database and to MSK, the apps' to the managed Redis and the OpenTelemetry Collector, and the ledger's to
-its database and MSK (`networkPolicy.gatewayEgress`, `riskServiceEgress`, `ledgerEgress`).
+the namespace, prod adds the gateway's egress to monobank's API and the merchants' webhook endpoints (443), and
+each app's to the OpenTelemetry Collector and to its own stores (`networkPolicy.gatewayEgress`, `riskServiceEgress`,
+`ledgerEgress`). Each store has a range of the VPC to itself, so these rules keep the gateway away from the ledger's
+database there too ([AWS](#aws)).
 
 risk-service's Service is headless: its name resolves to every ready pod, and each gateway's gRPC channel (target
 `dns:///risk-service:9090`, with Spring Boot's default `round_robin`) keeps a connection to each pod and takes turns.
@@ -434,9 +436,34 @@ On k3d, `deploy.sh` builds the images from the jars and tags them with a checksu
 new pods and the same jars change nothing; with `IMAGE_REGISTRY` and `IMAGE_TAG` it takes a registry's images
 instead, such as a released version's. `k3d image import` loads them, PostgreSQL's, Redis' and Kafka's with them,
 into every node, so the nodes pull nothing from a registry. The chart is checked twice: `ci/check-chart.sh` renders every
-environment and checks the result against Kubernetes 1.35's schemas, along with values the chart must refuse, and
-`deploy/k3d/smoke-test.sh` checks an environment that runs, from outside through the Ingress and from inside the
-pods.
+environment and checks the result against the schemas of the Kubernetes it runs on (1.35 on k3d, 1.37 for prod's
+EKS), along with values the chart must refuse, and `deploy/k3d/smoke-test.sh` checks an environment that runs, from
+outside through the Ingress and from inside the pods.
+
+## AWS
+
+[deploy/aws](deploy/aws/README.md) is the AWS of prod in Terraform, never applied from this repository: what
+values-prod.yaml needs, and nothing more.
+
+- **The VPC and EKS from terraform-aws-modules; the stores from modules of this repository's own.** The community
+  modules cover what every cluster needs (subnets, NAT, flow logs, the cluster, its node group and add-ons) as most
+  teams have them. The four small modules are where this project's rules are: each store encrypted and TLS only,
+  with a standby or replica in another zone, open to the EKS nodes alone, and each of these rules has a test.
+- **A range of the VPC for each store, and NetworkPolicies by range.** Every pod runs on the same nodes, so the
+  stores' security groups can only let in the nodes. The VPC CNI enforces the chart's NetworkPolicies, and with a
+  `/22` of its own for each store, they let each app reach only its own stores. This is the same mechanism as on
+  k3d, and it doesn't need AWS security groups for pods. `prod/tests` fails when values-prod.yaml's rules and the
+  ranges differ.
+- **No password in git or in the state.** Terraform makes each database's password at every run but hands it only to
+  write-only arguments, of RDS and of the database's secret, which it sends again only when `password_version` rises.
+  External Secrets reads the secrets with an IAM role from EKS Pod Identity that may read these three and no others.
+- **A private Kubernetes API.** The API answers only inside the VPC: people come through a VPN or a bastion, and a
+  deploy job through a runner there.
+- **MSK over TLS without client authentication**, as values-prod.yaml connects: the brokers' security group and the
+  NetworkPolicies decide who reaches them. With IAM authentication instead, the gateway and the ledger would need
+  AWS's SASL library. The brokers' storage has a KMS key of its own, rotated every year.
+- **Valkey rather than Redis OSS on ElastiCache**: the engine AWS recommends, with the same protocol as the Redis the
+  apps use in compose and on k3d.
 
 ## Pipeline
 
@@ -447,7 +474,8 @@ through them:
 | Stage   | Job     | Fails when                                                                        | Runs on    |
 |---------|---------|-----------------------------------------------------------------------------------|------------|
 | test    | verify  | a test fails, a module's line coverage is under 80 %, or SpotBugs finds a bug pattern of medium priority or above | every push |
-| test    | chart   | the chart doesn't lint, renders something Kubernetes 1.35 would refuse, or takes a value it must refuse | every push |
+| test    | chart   | the chart doesn't lint, renders something the Kubernetes it runs on would refuse, or takes a value it must refuse | every push |
+| test    | terraform | the AWS Terraform isn't formatted or valid, fails a test of its own or one against values-prod.yaml, breaks a tflint rule, or has a HIGH or CRITICAL misconfiguration | every push |
 | test    | secrets | a commit, any commit, holds something that looks like a key, a token or a password | every push |
 | package | images  | an image has a known HIGH or CRITICAL vulnerability that has a fix                | every push |
 | e2e     | e2e     | the commit's images, deployed as dev to a k3d cluster, fail the smoke test         | main       |
@@ -459,6 +487,12 @@ through them:
   contract, format strings in text blocks (which end their lines with `\n`, not `%n`), a list SpotBugs can't see is
   an unmodifiable copy, and the webhook retries' jitter, which needs no secure random. SpotBugs reads the libraries'
   JSpecify annotations, so a value Spring marks as possibly null must be checked before it is used.
+- **terraform** runs `ci/check-terraform.sh` over `deploy/aws` without an AWS account: `terraform fmt`, then `init`
+  without a backend, `validate` and `terraform test` for prod and each module, then tflint with its AWS rules and
+  Trivy's misconfiguration checks. The tests' providers are mocked, so they plan with made-up answers from AWS. The
+  registry's modules, with the example manifests that come with them, are left to their authors' checks: Trivy
+  skips the `.terraform` folders that `init` downloads them into (`--skip-dirs`) and leaves out their findings
+  (`--tf-exclude-downloaded-modules`).
 - **secrets** runs gitleaks' default rules over the whole history, since a secret a later commit deleted is still
   in git. `.gitleaks.toml` leaves out the tests, whose keys are made up for them or published test vectors.
 - **images** builds the five images from verify's jars, and Trivy scans each one's Ubuntu packages and the Java
@@ -472,7 +506,7 @@ through them:
   smoke test sends its requests for `*.dev.localhost:8280` to `docker:8280` (`INGRESS_ADDRESS`). Whatever the
   outcome, the job keeps the cluster's state and every pod's log as artifacts (`ci/collect-e2e-logs.sh`).
 - **release** gives the commit's images the version they were built as, from `pom.xml` through the jars'
-  build-info, such as `:0.9.3`, as a copy of the same manifest: the released image is byte for byte the one the
+  build-info, such as `:0.10.0`, as a copy of the same manifest: the released image is byte for byte the one the
   checks saw (`ci/release-images.sh`).
 
 Every tool a job downloads comes from `ci/install-tools.sh`, in a fixed version, checked against its published
@@ -547,7 +581,7 @@ checksum before it runs.
   runs those very images, and release only adds the version's tag to the same manifest. Building again for the
   release would release an image no check ever saw.
 - **A version is released once.** The release job never moves a version's tag: a later commit of the same version
-  keeps only its commit tag, so `0.9.3` names one build wherever it runs.
+  keeps only its commit tag, so `0.10.0` names one build wherever it runs.
 - **Static analysis fails the build, with its exceptions written down.** A report nobody must read stops being
   read; a short exclude file, a reason for each entry, keeps the findings few enough that a new one gets looked at.
 - **Image scans fail on what can be fixed.** HIGH and CRITICAL vulnerabilities with a fix stop the pipeline; one

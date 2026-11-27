@@ -109,6 +109,19 @@ chart:
   script:
     - bash ci/check-chart.sh
 
+# The AWS Terraform of deploy/aws, which is never applied from this repository, checked without an AWS account:
+# formatting, validate, terraform test with mocked providers, tflint and trivy (ci/check-terraform.sh). git is for
+# terraform init, which fetches the registry's modules from GitHub.
+terraform:
+  stage: test
+  image: alpine:3.24
+  needs: []
+  before_script:
+    - apk add --no-cache bash curl git unzip
+    - bash ci/install-tools.sh terraform tflint trivy
+  script:
+    - bash ci/check-terraform.sh
+
 # The whole history searched for secrets with gitleaks: keys, tokens and passwords committed by mistake, which a
 # later commit that deletes them doesn't take back. .gitleaks.toml says what it leaves out.
 secrets:
@@ -185,7 +198,7 @@ e2e:
     paths:
       - e2e/
 
-# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.9.3
+# The commit's images, which passed every job above, tagged with the version they were built as, such as :0.10.0
 # (ci/release-images.sh). A version is released once: a later commit of the same version keeps only its commit tag.
 release:
   stage: release
@@ -195,6 +208,7 @@ release:
     - job: verify
       artifacts: false
     - job: chart
+    - job: terraform
     - job: secrets
     - job: images
       artifacts: true

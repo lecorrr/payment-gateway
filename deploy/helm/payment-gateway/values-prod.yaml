@@ -1,15 +1,23 @@
-# An example of production. The pipeline renders it and checks the result against Kubernetes' schemas
-# (ci/check-chart.sh), but it is never installed from this repository. It shows what changes there: no simulators,
-# so payments go to monobank; PostgreSQL, Redis and Kafka are managed services, Amazon RDS, ElastiCache and MSK here,
-# the ledger's database an RDS of its own; the Secret
-# comes from the cluster's secret store, such as External Secrets from AWS Secrets Manager; the images come from the
-# project's container registry on GitLab, where the pipeline releases them under their version, which is the chart's
-# appVersion; Traefik serves https with a certificate from cert-manager; Prometheus and an OpenTelemetry Collector
-# watch the apps.
+# An example of production, on the AWS that deploy/aws/prod describes in Terraform. The pipeline renders it and checks
+# the result against Kubernetes' schemas (ci/check-chart.sh), but it is never installed from this repository. It shows
+# what changes there: no simulators, so payments go to monobank; PostgreSQL, Redis and Kafka are managed services,
+# Amazon RDS, ElastiCache and MSK, the ledger's database an RDS of its own, each store in a range of the VPC of its own,
+# with the addresses below standing for what deploy/aws/prod's output chart_values gives after an apply; External
+# Secrets writes the Secret from AWS Secrets Manager; the images come from the project's container registry on GitLab,
+# where the pipeline releases them under their version, which is the chart's appVersion; Traefik serves https with a
+# certificate from cert-manager; Prometheus and an OpenTelemetry Collector watch the apps.
 image:
   registry: registry.gitlab.com/lecorrr/payment-gateway
 
 existingSecret: payment-gateway
+
+# From the secrets deploy/aws/prod makes, through deploy/aws/cluster-secret-store.yaml.
+externalSecret:
+  enabled: true
+  storeName: aws-secrets-manager
+  databaseSecret: payment-gateway/prod/gateway-db
+  ledgerDatabaseSecret: payment-gateway/prod/ledger-db
+  appSecret: payment-gateway/prod/app
 
 ingress:
   annotations:
@@ -70,7 +78,7 @@ ledger:
   postgres:
     enabled: false
   database:
-    url: jdbc:postgresql://payment-ledger.cluster-example.eu-central-1.rds.amazonaws.com:5432/ledger?sslmode=require
+    url: jdbc:postgresql://payment-ledger.example.eu-central-1.rds.amazonaws.com:5432/ledger?sslmode=require
     username: ledger
 
 acquirerSim:
@@ -83,7 +91,7 @@ merchantSim:
 postgres:
   enabled: false
 database:
-  url: jdbc:postgresql://payment-gateway.cluster-example.eu-central-1.rds.amazonaws.com:5432/gateway?sslmode=require
+  url: jdbc:postgresql://payment-gateway.example.eu-central-1.rds.amazonaws.com:5432/gateway?sslmode=require
   username: gateway
 
 redis:
@@ -123,13 +131,22 @@ networkPolicy:
               - 192.168.0.0/16
       ports:
         - port: 443
-    # The database, Redis and Kafka, in the VPC.
+    # Its database, Redis and Kafka: each store has a range of the VPC of its own (deploy/aws/prod/network.tf), so the
+    # gateway reaches the ledger's database no more than on k3d. deploy/aws/prod/tests checks these rules.
     - to:
         - ipBlock:
-            cidr: 10.0.0.0/16
+            cidr: 10.0.200.0/22
       ports:
         - port: 5432
+    - to:
+        - ipBlock:
+            cidr: 10.0.208.0/22
+      ports:
         - port: 6379
+    - to:
+        - ipBlock:
+            cidr: 10.0.212.0/22
+      ports:
         - port: 9094
     - to:
         - namespaceSelector:
@@ -138,9 +155,10 @@ networkPolicy:
       ports:
         - port: 4318
   riskServiceEgress:
+    # Redis.
     - to:
         - ipBlock:
-            cidr: 10.0.0.0/16
+            cidr: 10.0.208.0/22
       ports:
         - port: 6379
     - to:
@@ -150,12 +168,16 @@ networkPolicy:
       ports:
         - port: 4318
   ledgerEgress:
-    # Its database and Kafka, in the VPC.
+    # Its own database and Kafka.
     - to:
         - ipBlock:
-            cidr: 10.0.0.0/16
+            cidr: 10.0.204.0/22
       ports:
         - port: 5432
+    - to:
+        - ipBlock:
+            cidr: 10.0.212.0/22
+      ports:
         - port: 9094
     - to:
         - namespaceSelector:

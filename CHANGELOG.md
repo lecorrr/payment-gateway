@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.0 (2026-11-27)
+
+- `deploy/aws`: the AWS of prod in Terraform, never applied. It has an EKS cluster (Kubernetes 1.37) in a VPC across
+  three zones, the gateway's and the ledger's PostgreSQL 17 on RDS, Valkey on ElastiCache, Kafka 4.2 on MSK, and the
+  secrets External Secrets reads, all as values-prod.yaml expects them. The VPC and the cluster come from
+  terraform-aws-modules; the stores and the secrets come from four modules of this repository's own, each with tests
+  of its rules.
+- Each store has a range of the VPC to itself, and values-prod.yaml's NetworkPolicies let each app reach only its own
+  stores' ranges, so the gateway can't reach the ledger's database on AWS either; before, they opened the stores'
+  ports in the whole VPC. A test of `deploy/aws/prod` fails when values-prod.yaml and the network disagree.
+- Terraform makes the databases' passwords but keeps them out of its state (write-only arguments). The chart can write
+  its Secret through External Secrets from AWS Secrets Manager (`externalSecret`, on in values-prod.yaml).
+- The pipeline's new `terraform` job checks `deploy/aws` without an AWS account: formatting, `terraform validate`,
+  `terraform test` with mocked providers, tflint's AWS rules and Trivy. The `chart` job now checks prod against
+  Kubernetes 1.37, the version of its EKS cluster, along with External Secrets' store for it.
+
 ## 0.9.3 (2026-11-27)
 
 - A new risk-service pod's first assessment took about 0.5 s while every pod of staging started at once, past the

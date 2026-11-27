@@ -24,6 +24,21 @@ image:
 #   GATEWAY_DEMO_MERCHANT_WEBHOOK_SECRET  with merchant-sim: the whsec_ secret of the demo merchant's webhooks
 existingSecret: payment-gateway
 
+# The Secret from a secret store through External Secrets (external-secrets.io), as in values-prod.yaml: an
+# ExternalSecret writes existingSecret with DB_PASSWORD and LEDGER_DB_PASSWORD, the password of the databases' secrets,
+# and every key of the app's secret, a JSON object. With enabled false, the Secret is made some other way, as
+# deploy/k3d/deploy.sh does.
+externalSecret:
+  enabled: false
+  # A ClusterSecretStore, such as deploy/aws/cluster-secret-store.yaml's aws-secrets-manager.
+  storeName: ""
+  # How often External Secrets reads the store again.
+  refreshInterval: 1h
+  # The secrets' names in the store.
+  databaseSecret: ""
+  ledgerDatabaseSecret: ""
+  appSecret: ""
+
 # How browsers reach the apps: the Ingress, and the public URLs the apps send customers' browsers to (the 3-D Secure
 # pages and the way back to the gateway).
 ingress:

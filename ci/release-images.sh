@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The pipeline's release job: gives the commit's five images, which passed every job before this one, the version
-# they were built as too: $CI_REGISTRY_IMAGE/<app>:$CI_COMMIT_SHA gets the tag $APP_VERSION (such as 0.9.3) from the
+# they were built as too: $CI_REGISTRY_IMAGE/<app>:$CI_COMMIT_SHA gets the tag $APP_VERSION (such as 0.10.0) from the
 # images job. The images are only tagged again, not built again, so the version is exactly what the checks saw. A
 # version names one build: an image that has the version's tag already keeps it.
 #
