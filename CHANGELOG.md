@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.4 (2026-11-28)
+
+- While a new gateway waited for risk-service, gRPC logged `Failed to resolve name` about once a second: 26 times in
+  the 22 s the e2e job's gateway waited. Before each new ask, `RiskWarmUp` had gRPC look risk-service up again. It
+  still asks each second, but leaves the lookups to gRPC, which tries again after growing pauses, so a wait of a
+  minute logs about eight of them. Looking up each second gained little: the Java resolver remembers a failed lookup
+  for 10 s, so most of those lookups never reached DNS.
+- `RiskWarmUp` takes the risk channel as a plain `Channel`: it only makes calls on it.
+- README: deploying the released images names 0.11.4.
+
 ## 0.11.3 (2026-11-28)
 
 - The pipeline's `e2e` job ran for the first time in 0.11.2, and the smoke test failed one check of 19: the first

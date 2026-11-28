@@ -1,7 +1,7 @@
 package dev.tkachuk.gateway.risk;
 
 import dev.tkachuk.gateway.common.Durations;
-import io.grpc.ManagedChannel;
+import io.grpc.Channel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.health.v1.HealthCheckRequest;
@@ -36,10 +36,10 @@ class RiskWarmUp implements ApplicationRunner {
     private static final Set<Status.Code> NO_ANSWER =
             Set.of(Status.Code.DEADLINE_EXCEEDED, Status.Code.UNAVAILABLE, Status.Code.CANCELLED);
 
-    private final ManagedChannel channel;
+    private final Channel channel;
     private final RiskProperties properties;
 
-    RiskWarmUp(ManagedChannel riskChannel, RiskProperties properties) {
+    RiskWarmUp(Channel riskChannel, RiskProperties properties) {
         this.channel = riskChannel;
         this.properties = properties;
     }
@@ -78,8 +78,6 @@ class RiskWarmUp implements ApplicationRunner {
                             + "gateway reports ready", lastFailure,
                             Durations.readable(perAttempt.multipliedBy(attempts)));
                 }
-                // Looks risk-service up again now, rather than after the channel's growing backoff.
-                channel.resetConnectBackoff();
             }
         }
         log.warn("risk-service did not answer over gRPC in {} ms ({}); the first payments may wait longer for their "
