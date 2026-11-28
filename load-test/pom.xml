@@ -8,7 +8,7 @@
          compiles it and runs its unit tests. -->
     <groupId>dev.tkachuk</groupId>
     <artifactId>payment-gateway-load-test</artifactId>
-    <version>0.11.1</version>
+    <version>0.11.2</version>
     <name>payment-gateway load test</name>
     <description>Payments at rising rates through an environment's Ingress, with Gatling</description>
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.2 (2026-11-28)
+
+- The images job's Trivy scan ran for the first time in 0.11.1 and found HIGH vulnerabilities, each with a fix, in
+  three libraries that other dependencies bring: lz4-java 1.11.2 and snappy-java 1.1.10.7, which come with Kafka's
+  client (gateway-service and ledger-service), and Guava 33.6.0, which comes with gRPC (gateway-service and
+  risk-service). pom.xml now manages them at the fixed versions: lz4-java 1.11.4, snappy-java 1.1.10.9 and Guava
+  33.7.2. The images' Ubuntu packages had none.
+- README: deploying the released images names 0.11.2.
+
 ## 0.11.1 (2026-11-28)
 
 - The pipeline's `images` job failed on every commit since 0.9.2 (0.8.0, which brought it, stopped earlier, at
