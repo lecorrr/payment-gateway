@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.3 (2026-11-28)
+
+- The pipeline's `e2e` job ran for the first time in 0.11.2, and the smoke test failed one check of 19: the first
+  payment went ahead without a risk check. A new gateway's first call to risk-service does what the later ones
+  don't: it looks risk-service's pods up, connects to them and loads what the call goes through. On the job's runner
+  that took longer than the gateway's 300 ms deadline. Now, before it reports ready, the gateway asks risk-service
+  for its health over the channel the risk checks use (`RiskWarmUp`, with gRPC's standard health service, which
+  risk-service has). When every pod starts at once and risk-service isn't ready yet, the gateway asks again each
+  second, for a minute at most, and then starts anyway.
+- risk-service's warm-up connects to Redis before it assesses its made-up payment, trying up to five times. In the
+  job's cluster the first connection took longer than Redis's 100 ms timeouts, so the made-up payment found no Redis,
+  and risk-service then left Redis alone for 30 s: the first payments after the pod was ready weren't counted for
+  the limit on payments per card.
+- README: deploying the released images names 0.11.3.
+
 ## 0.11.2 (2026-11-28)
 
 - The images job's Trivy scan ran for the first time in 0.11.1 and found HIGH vulnerabilities, each with a fix, in

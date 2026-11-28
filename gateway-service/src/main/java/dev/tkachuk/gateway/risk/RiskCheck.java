@@ -109,7 +109,8 @@ public class RiskCheck {
                 .build();
     }
 
-    private static String describe(RuntimeException e) {
+    /** A failed call as its status code and description, or the exception's class for anything but a status. */
+    static String describe(RuntimeException e) {
         if (e instanceof StatusRuntimeException statusException) {
             Status status = statusException.getStatus();
             return status.getDescription() == null

@@ -6,7 +6,7 @@
 # a new tag, which replaces the pods; the same jars change nothing.
 #
 # With IMAGE_REGISTRY and IMAGE_TAG it deploys the five images a registry has instead, such as the ones the pipeline
-# released (IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.11.2) or pushed for a commit
+# released (IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.11.3) or pushed for a commit
 # (IMAGE_TAG=<the commit's full SHA>, which the pipeline's e2e job deploys). Nothing is built then, and no jars are
 # needed.
 #

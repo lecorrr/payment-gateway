@@ -10,11 +10,26 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.jayway.jsonpath.JsonPath;
 import dev.tkachuk.gateway.support.IntegrationTest;
 import dev.tkachuk.risk.api.AssessRequest;
+import dev.tkachuk.risk.api.RiskServiceGrpc;
+import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 
 /** The risk check in the payment's way, over gRPC to FakeRiskService. */
 class RiskCheckIT extends IntegrationTest {
+
+    @Autowired
+    private ManagedChannel riskChannel;
+
+    @Autowired
+    private RiskServiceGrpc.RiskServiceBlockingStub riskServiceStub;
+
+    // RiskWarmUp connects this channel before the gateway reports ready, not one of its own.
+    @Test
+    void shouldCheckOverTheChannelTheWarmUpConnects() {
+        assertThat(riskServiceStub.getChannel()).isSameAs(riskChannel);
+    }
 
     @Test
     void shouldChargePaymentRiskServiceAllows() throws Exception {

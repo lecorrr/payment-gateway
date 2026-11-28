@@ -6,6 +6,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig.SlidingWindowType;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.micrometer.tagged.TaggedCircuitBreakerMetricsPublisher;
+import io.grpc.ManagedChannel;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
@@ -22,10 +23,18 @@ class RiskClientConfiguration {
     private static final int FAILURE_RATE_PERCENT = 50;
     private static final int TRIAL_CALLS = 2;
 
-    /** Over the channel named risk: where it goes is spring.grpc.client.channel.risk.target. */
+    /**
+     * The channel named risk, which goes where spring.grpc.client.channel.risk.target says: one for the risk checks
+     * and for RiskWarmUp, which connects it before the gateway reports ready. The factory that made it shuts it down.
+     */
+    @Bean(destroyMethod = "")
+    ManagedChannel riskChannel(GrpcChannelFactory channels) {
+        return channels.createChannel("risk");
+    }
+
     @Bean
-    RiskServiceGrpc.RiskServiceBlockingStub riskServiceStub(GrpcChannelFactory channels) {
-        return RiskServiceGrpc.newBlockingStub(channels.createChannel("risk"));
+    RiskServiceGrpc.RiskServiceBlockingStub riskServiceStub(ManagedChannel riskChannel) {
+        return RiskServiceGrpc.newBlockingStub(riskChannel);
     }
 
     /** Made through a registry of its own, which publishes its state as resilience4j.circuitbreaker.* metrics. */

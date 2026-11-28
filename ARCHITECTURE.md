@@ -177,12 +177,21 @@ least five came and half of them were errors or late, payments stop waiting for 
 s), and then two trial calls decide whether it is back. The channel is plaintext inside the compose network;
 `spring.grpc.client.channel.risk.ssl` turns TLS on.
 
-A new risk-service is not ready until it has assessed one made-up payment through its own gRPC server (`WarmUp`,
-over the channel `self` to localhost). Its first assessment loads what the gRPC path, the rules and Redis's
-connection need: while every pod of staging started at once it took about 0.5 s, past the gateway's deadline, and
-that payment went ahead unchecked. Spring Boot reports ready only once the warm-up has run, and the gateways call no
-pod before it is ready. The warm-up shows as an allowed assessment of payment `warm-up`, counted in Redis for a card
-`warm-up` of its own; one that fails is logged, and risk-service starts anyway.
+A new risk-service is not ready until it has connected to Redis and assessed one made-up payment through its own
+gRPC server (`WarmUp`, over the channel `self` to localhost). Its first assessment loads what the gRPC path, the
+rules and Redis's connection need: while every pod of staging started at once it took about 0.5 s, past the
+gateway's deadline, and that payment went ahead unchecked. Redis's first connection alone can take longer than its
+100 ms timeouts, which would leave the velocity rule out for 30 s, so the warm-up makes it first, trying up to five
+times. Spring Boot reports ready only once the warm-up has run, and the gateways call no pod before it is ready. The
+warm-up shows as an allowed assessment of payment `warm-up`, counted in Redis for a card `warm-up` of its own; one
+that fails is logged, and risk-service starts anyway.
+
+A new gateway warms its side of the channel the same way. Before it reports ready, `RiskWarmUp` asks risk-service
+for its health (gRPC's standard `grpc.health.v1.Health`, which Spring Boot gives risk-service) over the channel the
+risk checks use, so the first payment doesn't wait while the gateway looks risk-service's pods up, connects to them
+and loads what a call goes through: in the e2e job's cluster that took longer than the deadline. When every pod
+starts at once, risk-service may be ready after the gateway, so the gateway asks again each second, for a minute at
+most, and then starts anyway.
 
 ## 3-D Secure
 

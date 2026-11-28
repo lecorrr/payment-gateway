@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.11.2</version>
+        <version>0.11.3</version>
     </parent>
 
     <artifactId>gateway-service</artifactId>
@@ -84,6 +84,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-grpc-client</artifactId>
+        </dependency>
+        <!-- The client of gRPC's standard health service, which asks risk-service before the gateway reports ready
+             (RiskWarmUp). -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-services</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springdoc</groupId>

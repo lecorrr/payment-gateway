@@ -33,7 +33,8 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
  * after 1 s and given up after 2 s, a challenge is looked up every 300 ms, and a webhook is retried twice, 200 ms
  * apart. New payments go to acquirer-sim, and to monobank when acquirer-sim is unavailable; a provider's circuit
  * opens for 10 s once half of its last charges (at least 2, at most 4) failed. risk-service is FakeRiskService, over
- * in-process gRPC, and allows every payment until a test says otherwise. All integration tests share this one
+ * in-process gRPC beside gRPC's health service, which RiskWarmUp asks at startup, and allows every payment until a
+ * test says otherwise. All integration tests share this one
  * context, so they share its containers too. Every test starts with no payments, no webhook events, only the demo
  * merchant, which has no webhook endpoint, a risk-service that allows everything, and every circuit closed. Refunds
  * are looked up on the same timings as payments. The outbox's events go to the payment-events topic every 100 ms;
@@ -63,7 +64,10 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
         "gateway.webhooks.connect-timeout=300ms",
         "gateway.webhooks.read-timeout=1s",
         "gateway.webhooks.retry-delays=200ms,200ms",
-        "gateway.events.publish-interval=100ms"})
+        "gateway.events.publish-interval=100ms",
+        // The health service keeps the status it starts with, rather than taking one from the actuator every 5 s on
+        // the scheduler's threads, which the gateway's own background tasks have one each of.
+        "spring.grpc.server.health.schedule.enabled=false"})
 @AutoConfigureMockMvc
 @AutoConfigureTestGrpcTransport
 @Import({PostgresTestcontainer.class, RedisTestcontainer.class, KafkaTestcontainer.class, AcquirerStub.class,
