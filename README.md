@@ -345,7 +345,7 @@ Secret. It can also put out the images the pipeline released, from the project's
 anyone may pull from, with nothing built here:
 
 ```bash
-IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.11.0 deploy/k3d/deploy.sh staging
+IMAGE_REGISTRY=registry.gitlab.com/lecorrr/payment-gateway IMAGE_TAG=0.11.1 deploy/k3d/deploy.sh staging
 ```
 
 `IMAGE_TAG` can also be a commit's full SHA: the images the pipeline pushed for that commit. An environment goes,

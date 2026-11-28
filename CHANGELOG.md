@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.1 (2026-11-28)
+
+- The pipeline's `images` job failed on every commit since 0.9.2 (0.8.0, which brought it, stopped earlier, at
+  verify), so the image scan, e2e and release never ran. It looked for the version in
+  `BOOT-INF/classes/META-INF/build-info.properties`, but Spring Boot's repackaging leaves `META-INF/` at the jar's
+  root, so the file is `META-INF/build-info.properties`. The job's `unzip` is BusyBox's, which prints nothing and
+  succeeds for an entry a jar doesn't have, so the job reported an empty version instead of a missing file. It now
+  reads the file at the root, and names the jar and the entry when it isn't there.
+- README: deploying the released images names 0.11.1, since no earlier version got through the pipeline to a
+  release.
+
 ## 0.11.0 (2026-11-27)
 
 - `load-test`: a Gatling load test in Java that sends payments through an environment's Ingress at fixed rates

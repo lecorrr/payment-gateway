@@ -17,11 +17,18 @@ fail() {
     exit 1
 }
 
+# Spring Boot's repackaging leaves META-INF/ at the jar's root, apart from META-INF/services/, aop.xml and Kotlin
+# module files, which move into BOOT-INF/classes/. So build-info.properties stays META-INF/build-info.properties.
+build_info=META-INF/build-info.properties
+
 # The build.version Spring Boot's build-info wrote into an app's jar.
 jar_version() {
-    local jar="$1/target/$1.jar"
+    local jar="$1/target/$1.jar" properties
     [[ -f "$jar" ]] || fail "$jar is missing; the job takes the jars from the verify job's artifacts"
-    unzip -p "$jar" BOOT-INF/classes/META-INF/build-info.properties | sed -n 's/^build\.version=//p'
+    # This image's unzip is BusyBox's, which prints nothing and succeeds for an entry the jar doesn't have.
+    properties="$(unzip -p "$jar" "$build_info")"
+    [[ -n "$properties" ]] || fail "$jar has no $build_info, which spring-boot-maven-plugin's build-info goal writes"
+    sed -n 's/^build\.version=//p' <<< "$properties"
 }
 
 version="$(jar_version gateway-service)"

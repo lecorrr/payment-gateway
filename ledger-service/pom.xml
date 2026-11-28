@@ -7,7 +7,7 @@
     <parent>
         <groupId>dev.tkachuk</groupId>
         <artifactId>payment-gateway</artifactId>
-        <version>0.11.0</version>
+        <version>0.11.1</version>
     </parent>
 
     <artifactId>ledger-service</artifactId>
